@@ -20,7 +20,7 @@ pub struct WireGuardTunnelInfo {
 pub struct WireGuardManager;
 
 impl WireGuardManager {
-    /// List all registered WireGuard NetworkExtension tunnels on macOS.
+    /// List all registered WireGuard tunnels on current platform.
     pub fn list_tunnels() -> Vec<WireGuardTunnelInfo> {
         #[cfg(target_os = "macos")]
         {
@@ -32,7 +32,6 @@ impl WireGuardManager {
             if let Ok(out) = output {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 for line in stdout.lines() {
-                    // Example: * (Disconnected)   8F41D33D-453B-4AF3-AF08-E540A9A0C9F7 VPN (com.wireguard.macos) "wg0-daily"
                     if line.contains("com.wireguard.macos") || line.contains("WireGuard") {
                         let state = if line.contains("(Connected)") {
                             WireGuardState::Connected
@@ -44,7 +43,6 @@ impl WireGuardManager {
                             WireGuardState::Disconnected
                         };
 
-                        // Extract name inside quotes
                         if let Some(start) = line.find('"') {
                             if let Some(end) = line[start + 1..].find('"') {
                                 let name = &line[start + 1..start + 1 + end];
@@ -60,7 +58,64 @@ impl WireGuardManager {
             }
             tunnels
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            let mut tunnels = Vec::new();
+            let conf_dir = std::path::Path::new(r"C:\Program Files\WireGuard\Data\Configurations");
+            if let Ok(entries) = std::fs::read_dir(conf_dir) {
+                for entry in entries.flatten() {
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    let name = if let Some(stripped) = file_name.strip_suffix(".conf.dpapi") {
+                        stripped.to_string()
+                    } else if let Some(stripped) = file_name.strip_suffix(".conf") {
+                        stripped.to_string()
+                    } else {
+                        continue;
+                    };
+                    let state = Self::status(&name);
+                    tunnels.push(WireGuardTunnelInfo {
+                        name,
+                        service_id: "".to_string(),
+                        state,
+                    });
+                }
+            }
+
+            // Also check running Windows services
+            let output = std::process::Command::new("sc.exe")
+                .args(["query", "type=", "service", "state=", "all"])
+                .output();
+
+            if let Ok(out) = output {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("SERVICE_NAME: WireGuardTunnel$") {
+                        let name = trimmed.trim_start_matches("SERVICE_NAME: WireGuardTunnel$").to_string();
+                        if !tunnels.iter().any(|t| t.name == name) {
+                            let state = Self::status(&name);
+                            tunnels.push(WireGuardTunnelInfo {
+                                name,
+                                service_id: "".to_string(),
+                                state,
+                            });
+                        }
+                    }
+                }
+            }
+
+            if tunnels.is_empty() {
+                // Fallback default tunnel identifier
+                tunnels.push(WireGuardTunnelInfo {
+                    name: "wg0".to_string(),
+                    service_id: "".to_string(),
+                    state: Self::status("wg0"),
+                });
+            }
+
+            tunnels
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             Vec::new()
         }
@@ -88,7 +143,29 @@ impl WireGuardManager {
                 WireGuardState::Unknown("Failed to execute scutil".to_string())
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            let svc_name = format!("WireGuardTunnel${}", tunnel_name);
+            let output = std::process::Command::new("sc.exe")
+                .args(["query", &svc_name])
+                .output();
+
+            if let Ok(out) = output {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if stdout.contains("RUNNING") {
+                    WireGuardState::Connected
+                } else if stdout.contains("START_PENDING") {
+                    WireGuardState::Connecting
+                } else if stdout.contains("STOP_PENDING") {
+                    WireGuardState::Disconnecting
+                } else {
+                    WireGuardState::Disconnected
+                }
+            } else {
+                WireGuardState::Disconnected
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = tunnel_name;
             WireGuardState::Disconnected
@@ -110,10 +187,48 @@ impl WireGuardManager {
             }
             Ok(())
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            let svc_name = format!("WireGuardTunnel${}", tunnel_name);
+            let conf_dpapi = format!(r"C:\Program Files\WireGuard\Data\Configurations\{}.conf.dpapi", tunnel_name);
+            let conf_plain = format!(r"C:\Program Files\WireGuard\Data\Configurations\{}.conf", tunnel_name);
+
+            // If service already exists, start it
+            let status = std::process::Command::new("net.exe")
+                .args(["start", &svc_name])
+                .status();
+
+            if let Ok(s) = status {
+                if s.success() {
+                    return Ok(());
+                }
+            }
+
+            // Otherwise install service using wireguard.exe
+            let conf_path = if std::path::Path::new(&conf_dpapi).exists() {
+                conf_dpapi
+            } else {
+                conf_plain
+            };
+
+            let wg_exe = r"C:\Program Files\WireGuard\wireguard.exe";
+            if std::path::Path::new(wg_exe).exists() {
+                let status = std::process::Command::new(wg_exe)
+                    .args(["/installtunnelservice", &conf_path])
+                    .status()?;
+
+                if !status.success() {
+                    return Err(anyhow!("wireguard.exe /installtunnelservice failed with code {:?}", status.code()));
+                }
+                Ok(())
+            } else {
+                Err(anyhow!("WireGuard is not installed at {}", wg_exe))
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = tunnel_name;
-            Err(anyhow!("WireGuard management only implemented for macOS"))
+            Err(anyhow!("WireGuard management not supported on this platform"))
         }
     }
 
@@ -132,39 +247,45 @@ impl WireGuardManager {
             }
             Ok(())
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            let wg_exe = r"C:\Program Files\WireGuard\wireguard.exe";
+            if std::path::Path::new(wg_exe).exists() {
+                let _ = std::process::Command::new(wg_exe)
+                    .args(["/uninstalltunnelservice", tunnel_name])
+                    .status();
+            }
+
+            let svc_name = format!("WireGuardTunnel${}", tunnel_name);
+            let _ = std::process::Command::new("net.exe")
+                .args(["stop", &svc_name])
+                .status();
+
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = tunnel_name;
-            Err(anyhow!("WireGuard management only implemented for macOS"))
+            Err(anyhow!("WireGuard management not supported on this platform"))
         }
     }
 
     /// Connect a tunnel exclusively, disconnecting any conflicting WireGuard tunnel first.
     pub fn connect_exclusive(tunnel_name: &str) -> Result<()> {
-        let other_tunnel = if tunnel_name == "wg0-mac" {
-            "wg0-daily"
-        } else {
-            "wg0-mac"
-        };
-
-        if Self::status(other_tunnel) == WireGuardState::Connected {
-            println!("🔄 Disconnecting active tunnel '{}' before starting '{}'...", other_tunnel, tunnel_name);
-            let _ = Self::disconnect(other_tunnel);
-            std::thread::sleep(std::time::Duration::from_millis(400));
-        }
-
         Self::connect(tunnel_name)?;
 
-        // If connecting wg0-daily, re-sync learned routes
-        if tunnel_name == "wg0-daily" {
-            std::thread::sleep(std::time::Duration::from_millis(600));
-            crate::engine::smart_router::SmartRouter::sync_active_routes();
+        #[cfg(target_os = "macos")]
+        {
+            if tunnel_name == "wg0-daily" {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                crate::engine::smart_router::SmartRouter::sync_active_routes();
+            }
         }
 
         Ok(())
     }
 
-    /// Toggle WireGuard tunnel state exclusively (connects target while ensuring other tunnel is off).
+    /// Toggle WireGuard tunnel state.
     pub fn toggle_exclusive(tunnel_name: &str) -> Result<WireGuardState> {
         let current = Self::status(tunnel_name);
         match current {
@@ -179,7 +300,6 @@ impl WireGuardManager {
         }
     }
 
-    /// Toggle WireGuard tunnel state (alias for toggle_exclusive).
     pub fn toggle(tunnel_name: &str) -> Result<WireGuardState> {
         Self::toggle_exclusive(tunnel_name)
     }
