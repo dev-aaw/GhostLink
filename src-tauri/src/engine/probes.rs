@@ -3,7 +3,7 @@ use anyhow::Result;
 use regex::Regex;
 use std::time::{Duration, Instant};
 
-pub const BLOCK_NOTICE_REGEX: &str = r"(?i)(blocked|заблокирован|доступ ограничен)";
+pub const BLOCK_NOTICE_REGEX: &str = r"(?i)(access (to this (site|service|page) )?(is )?blocked|site (is )?blocked|erişimi? engellen|mahkeme kararı|5651 sayılı|доступ (к сайту )?ограничен|ресурс заблокирован|внесен в реестр)";
 pub const PNG_MAGIC_HEX: &str = "89504e470d0a1a0a";
 
 pub struct ProbeRunner {
@@ -62,6 +62,17 @@ impl ProbeRunner {
                 required_body_pattern: None,
                 reject_body_pattern: None,
                 expected_hex_prefix: Some(PNG_MAGIC_HEX.to_string()),
+            },
+            // 5. WikiLeaks Probe
+            ProbeRule {
+                id: "wikileaks".to_string(),
+                label: "WikiLeaks Portal".to_string(),
+                url: "https://www.wikileaks.org/".to_string(),
+                tier: ProbeTier::Full,
+                expected_statuses: vec![200],
+                required_body_pattern: Some(r"(?i)(wikileaks|<title>[^<]*wikileaks)".to_string()),
+                reject_body_pattern: Some(BLOCK_NOTICE_REGEX.to_string()),
+                expected_hex_prefix: None,
             },
         ];
 

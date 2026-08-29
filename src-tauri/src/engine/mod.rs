@@ -1,16 +1,28 @@
+pub mod autostart;
 pub mod binary_manager;
+pub mod ipc;
+pub mod notifications;
 pub mod payloads;
 pub mod process;
 pub mod probes;
+pub mod service;
+pub mod smart_router;
 pub mod strategies;
 pub mod system_proxy;
 pub mod types;
+pub mod wireguard;
 
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 use tokio::time::sleep;
 
+pub use autostart::AutoStartManager;
+pub use ipc::{DaemonClient, DaemonStatusInfo, IpcRequest, IpcResponse};
+pub use notifications::notify;
+pub use service::ServiceManager;
+pub use smart_router::{SmartRouteEntry, SmartRouter};
 pub use types::{EngineConfig, EngineState, Platform, ProbeResult, ProbeSummary, Strategy};
+pub use wireguard::{WireGuardManager, WireGuardState, WireGuardTunnelInfo};
 use binary_manager::BinaryManager;
 use process::ProcessHandle;
 use probes::ProbeRunner;
@@ -25,6 +37,7 @@ pub struct UnblockEngine {
     probe_runner: ProbeRunner,
     active_process: Option<ProcessHandle>,
     state: EngineState,
+    watchdog_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl UnblockEngine {
@@ -42,11 +55,16 @@ impl UnblockEngine {
             probe_runner,
             active_process: None,
             state: EngineState::Stopped,
+            watchdog_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     pub fn state(&self) -> &EngineState {
         &self.state
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.state, EngineState::Running { .. })
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -83,6 +101,10 @@ impl UnblockEngine {
             return Err(anyhow!("Binary executable not found: {:?}", exe_path));
         }
 
+        // Note: Previous process cleanup is handled by self.stop() above (line 96),
+        // which uses ProcessHandle::kill() to terminate the specific child process.
+        // We intentionally do NOT use pkill -f here as it would kill unrelated processes.
+
         println!("🚀 Launching engine with strategy: [{}]", strategy.name);
         let proc = ProcessHandle::spawn(&exe_path, &strategy.args)?;
         self.active_process = Some(proc);
@@ -90,17 +112,30 @@ impl UnblockEngine {
         // Give the process a brief moment to initialize its socket/driver
         sleep(Duration::from_millis(600)).await;
 
-        if let Some(ref mut p) = self.active_process {
-            if !p.is_alive() {
-                self.active_process = None;
-                self.state = EngineState::Error("Engine process exited unexpectedly upon startup".to_string());
-                return Err(anyhow!("Engine process failed to stay alive"));
+        // 1. Strict Pre-Proxy Port Verification: Verify that the process is actually listening on 127.0.0.1:port
+        let mut port_listening = false;
+        for _ in 0..30 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", self.config.socks_port)).await.is_ok() {
+                port_listening = true;
+                break;
             }
+            sleep(Duration::from_millis(60)).await;
         }
 
-        // On macOS, configure system SOCKS proxy if enabled
+        if !port_listening {
+            eprintln!("❌ CRITICAL ERROR: Engine process spawned but port {} is NOT accepting TCP connections! Refusing to enable system proxy.", self.config.socks_port);
+            let _ = self.stop().await;
+            return Err(anyhow!("tpws failed to bind and listen on 127.0.0.1:{}", self.config.socks_port));
+        }
+
+        println!("✅ Port {} verified actively listening and accepting traffic.", self.config.socks_port);
+
+        // 2. On macOS, configure system SOCKS proxy only AFTER port is 100% verified
         if cfg!(target_os = "macos") && self.config.apply_system_proxy {
-            let _ = self.proxy_mgr.enable_macos_proxy();
+            if let Err(e) = self.proxy_mgr.enable_macos_proxy() {
+                let _ = self.stop().await;
+                return Err(e);
+            }
         }
 
         self.state = EngineState::Running {
@@ -108,11 +143,61 @@ impl UnblockEngine {
             port: self.config.socks_port,
         };
 
+        // 3. Start Active Emergency Watchdog
+        let socks_port = self.config.socks_port;
+        let watchdog_flag = self.watchdog_running.clone();
+        watchdog_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        tokio::spawn(async move {
+            while watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                if !watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+
+                // Actively probe localhost port with timeout
+                let check = tokio::time::timeout(
+                    Duration::from_millis(350),
+                    tokio::net::TcpStream::connect(("127.0.0.1", socks_port)),
+                ).await;
+
+                let port_ok = match check {
+                    Ok(Ok(_)) => true,
+                    _ => false,
+                };
+
+                if !port_ok {
+                    if watchdog_flag.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        eprintln!("\n🚨 EMERGENCY WATCHDOG TRIGGERED: GhostLink engine dropped! Restoring system network settings instantly...");
+                        #[cfg(target_os = "macos")]
+                        {
+                            if let Some(service) = SystemProxyManager::detect_primary_macos_service() {
+                                let _ = std::process::Command::new("networksetup")
+                                    .args(["-setsocksfirewallproxystate", &service, "off"])
+                                    .status();
+                                let _ = std::process::Command::new("networksetup")
+                                    .args(["-setdnsservers", &service, "Empty"])
+                                    .status();
+                            }
+                            crate::engine::notifications::notify(
+                                "GhostLink Emergency Recovery",
+                                "GhostLink recovered from an error automatically (network restored)",
+                            );
+                        }
+                        eprintln!("✨ System network settings restored to normal.\n");
+                        break;
+                    }
+                }
+            }
+        });
+
         Ok(())
     }
 
     /// Stops the running engine and restores system settings.
     pub async fn stop(&mut self) -> Result<()> {
+        self.watchdog_running.store(false, std::sync::atomic::Ordering::SeqCst);
+
         if let Some(mut proc) = self.active_process.take() {
             println!("🛑 Stopping engine process...");
             let _ = proc.kill();

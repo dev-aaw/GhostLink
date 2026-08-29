@@ -12,9 +12,42 @@ impl ProcessHandle {
     /// Spawn the DPI engine process (tpws or winws) with the specified arguments.
     pub fn spawn(exe_path: &Path, args: &[String]) -> Result<Self> {
         let mut cmd = Command::new(exe_path);
-        cmd.args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args(args);
+
+        // Security: Write logs to ~/.ghostlink/engine.log (user-owned directory),
+        // NOT /tmp (world-writable, vulnerable to symlink attacks when daemon runs as root).
+        let log_path = {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            let dir = std::path::PathBuf::from(home).join(".ghostlink");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("engine.log")
+        };
+
+        // Security: Refuse to open if path is a symlink (prevents symlink-following attacks)
+        let can_open = if log_path.exists() {
+            match std::fs::symlink_metadata(&log_path) {
+                Ok(meta) => !meta.file_type().is_symlink(),
+                Err(_) => false,
+            }
+        } else {
+            true // File doesn't exist yet, safe to create
+        };
+
+        if can_open {
+            if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                if let Ok(file_err) = file.try_clone() {
+                    cmd.stdout(Stdio::from(file));
+                    cmd.stderr(Stdio::from(file_err));
+                } else {
+                    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                }
+            } else {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        } else {
+            eprintln!("⚠️ SECURITY: Refusing to open log file {:?} (symlink detected)", log_path);
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
 
         #[cfg(target_os = "windows")]
         {

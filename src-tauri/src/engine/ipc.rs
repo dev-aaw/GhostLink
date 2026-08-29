@@ -1,0 +1,314 @@
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
+
+use crate::engine::types::{ProbeSummary, Strategy};
+
+pub const DEFAULT_SOCKET_PATH: &str = "/var/run/ghostlink.sock";
+pub const FALLBACK_SOCKET_PATH: &str = "/tmp/ghostlink.sock";
+
+/// Returns the primary active socket path or fallback.
+pub fn get_socket_path() -> PathBuf {
+    let var_run = Path::new(DEFAULT_SOCKET_PATH);
+    if var_run.exists() {
+        return var_run.to_path_buf();
+    }
+    let tmp = Path::new(FALLBACK_SOCKET_PATH);
+    if tmp.exists() {
+        return tmp.to_path_buf();
+    }
+    var_run.to_path_buf()
+}
+
+/// Commands that client (CLI / GUI) sends to the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum IpcRequest {
+    Ping,
+    GetStatus,
+    Start {
+        strategy_id: String,
+        socks_port: Option<u16>,
+        apply_system_proxy: bool,
+    },
+    Stop,
+    ProbeDirect,
+    TestStrategy {
+        strategy_id: String,
+    },
+    AutoTune,
+    ConfigureDns {
+        servers: Vec<String>,
+    },
+    ResetDns,
+    WireGuardList,
+    WireGuardStatus {
+        tunnel: String,
+    },
+    WireGuardConnect {
+        tunnel: String,
+    },
+    WireGuardDisconnect {
+        tunnel: String,
+    },
+    WireGuardToggle {
+        tunnel: String,
+    },
+    AddRoute {
+        ip: String,
+        router: String,
+        iface: String,
+    },
+    DeleteRoute {
+        ip: String,
+        router: String,
+        iface: String,
+    },
+    ShutdownDaemon,
+}
+
+/// Responses returned by daemon to client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum IpcResponse {
+    Ok {
+        message: String,
+    },
+    Pong {
+        version: String,
+        is_root: bool,
+        pid: u32,
+    },
+    Status(DaemonStatusInfo),
+    ProbeResult(ProbeSummary),
+    AutoTuneResult {
+        best_strategy: Option<Strategy>,
+        latency_ms: Option<u64>,
+    },
+    WireGuardList(Vec<crate::engine::wireguard::WireGuardTunnelInfo>),
+    WireGuardStatus {
+        tunnel: String,
+        state: crate::engine::wireguard::WireGuardState,
+    },
+    Error {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonStatusInfo {
+    pub is_running: bool,
+    pub active_strategy_id: Option<String>,
+    pub active_strategy_name: Option<String>,
+    pub socks_port: Option<u16>,
+    pub engine_pid: Option<u32>,
+    pub daemon_pid: u32,
+    pub is_root: bool,
+    pub uptime_secs: u64,
+}
+
+/// IPC client to interact with running ghostlink_daemon.
+pub struct DaemonClient {
+    socket_path: PathBuf,
+}
+
+impl Default for DaemonClient {
+    fn default() -> Self {
+        Self::new(get_socket_path())
+    }
+}
+
+impl DaemonClient {
+    pub fn new(socket_path: PathBuf) -> Self {
+        Self { socket_path }
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    pub async fn is_daemon_alive(&self) -> bool {
+        match self.ping().await {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+
+    pub async fn send_request(&self, request: &IpcRequest) -> Result<IpcResponse> {
+        let stream = UnixStream::connect(&self.socket_path)
+            .await
+            .with_context(|| format!("Failed to connect to daemon socket at {:?}", self.socket_path))?;
+
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+
+        let mut req_str = serde_json::to_string(request)?;
+        req_str.push('\n');
+
+        writer.write_all(req_str.as_bytes()).await?;
+        writer.flush().await?;
+
+        let mut response_line = String::new();
+        let bytes_read = reader.read_line(&mut response_line).await?;
+
+        if bytes_read == 0 {
+            return Err(anyhow!("Daemon closed connection unexpectedly without response"));
+        }
+
+        let resp: IpcResponse = serde_json::from_str(&response_line)
+            .with_context(|| format!("Invalid response JSON from daemon: {}", response_line.trim()))?;
+
+        match resp {
+            IpcResponse::Error { error } => Err(anyhow!("Daemon error: {}", error)),
+            other => Ok(other),
+        }
+    }
+
+    pub async fn ping(&self) -> Result<(String, bool, u32)> {
+        match self.send_request(&IpcRequest::Ping).await? {
+            IpcResponse::Pong { version, is_root, pid } => Ok((version, is_root, pid)),
+            other => Err(anyhow!("Unexpected response to Ping: {:?}", other)),
+        }
+    }
+
+    pub async fn get_status(&self) -> Result<DaemonStatusInfo> {
+        match self.send_request(&IpcRequest::GetStatus).await? {
+            IpcResponse::Status(info) => Ok(info),
+            other => Err(anyhow!("Unexpected response to GetStatus: {:?}", other)),
+        }
+    }
+
+    pub async fn start(
+        &self,
+        strategy_id: &str,
+        socks_port: Option<u16>,
+        apply_system_proxy: bool,
+    ) -> Result<String> {
+        let req = IpcRequest::Start {
+            strategy_id: strategy_id.to_string(),
+            socks_port,
+            apply_system_proxy,
+        };
+        match self.send_request(&req).await? {
+            IpcResponse::Ok { message } => Ok(message),
+            other => Err(anyhow!("Unexpected response to Start: {:?}", other)),
+        }
+    }
+
+    pub async fn stop(&self) -> Result<String> {
+        match self.send_request(&IpcRequest::Stop).await? {
+            IpcResponse::Ok { message } => Ok(message),
+            other => Err(anyhow!("Unexpected response to Stop: {:?}", other)),
+        }
+    }
+
+    pub async fn probe_direct(&self) -> Result<ProbeSummary> {
+        match self.send_request(&IpcRequest::ProbeDirect).await? {
+            IpcResponse::ProbeResult(summary) => Ok(summary),
+            other => Err(anyhow!("Unexpected response to ProbeDirect: {:?}", other)),
+        }
+    }
+
+    pub async fn test_strategy(&self, strategy_id: &str) -> Result<ProbeSummary> {
+        let req = IpcRequest::TestStrategy {
+            strategy_id: strategy_id.to_string(),
+        };
+        match self.send_request(&req).await? {
+            IpcResponse::ProbeResult(summary) => Ok(summary),
+            other => Err(anyhow!("Unexpected response to TestStrategy: {:?}", other)),
+        }
+    }
+
+    pub async fn auto_tune(&self) -> Result<(Option<Strategy>, Option<u64>)> {
+        match self.send_request(&IpcRequest::AutoTune).await? {
+            IpcResponse::AutoTuneResult { best_strategy, latency_ms } => Ok((best_strategy, latency_ms)),
+            other => Err(anyhow!("Unexpected response to AutoTune: {:?}", other)),
+        }
+    }
+
+    pub async fn configure_dns(&self, servers: Vec<String>) -> Result<String> {
+        match self.send_request(&IpcRequest::ConfigureDns { servers }).await? {
+            IpcResponse::Ok { message } => Ok(message),
+            other => Err(anyhow!("Unexpected response to ConfigureDns: {:?}", other)),
+        }
+    }
+
+    pub async fn reset_dns(&self) -> Result<String> {
+        match self.send_request(&IpcRequest::ResetDns).await? {
+            IpcResponse::Ok { message } => Ok(message),
+            other => Err(anyhow!("Unexpected response to ResetDns: {:?}", other)),
+        }
+    }
+
+    pub async fn shutdown_daemon(&self) -> Result<String> {
+        match self.send_request(&IpcRequest::ShutdownDaemon).await? {
+            IpcResponse::Ok { message } => Ok(message),
+            other => Err(anyhow!("Unexpected response to ShutdownDaemon: {:?}", other)),
+        }
+    }
+
+    pub async fn wireguard_list(&self) -> Result<Vec<crate::engine::wireguard::WireGuardTunnelInfo>> {
+        match self.send_request(&IpcRequest::WireGuardList).await? {
+            IpcResponse::WireGuardList(tunnels) => Ok(tunnels),
+            other => Err(anyhow!("Unexpected response to WireGuardList: {:?}", other)),
+        }
+    }
+
+    pub async fn wireguard_status(&self, tunnel: &str) -> Result<crate::engine::wireguard::WireGuardState> {
+        let req = IpcRequest::WireGuardStatus { tunnel: tunnel.to_string() };
+        match self.send_request(&req).await? {
+            IpcResponse::WireGuardStatus { state, .. } => Ok(state),
+            other => Err(anyhow!("Unexpected response to WireGuardStatus: {:?}", other)),
+        }
+    }
+
+    pub async fn wireguard_connect(&self, tunnel: &str) -> Result<String> {
+        let req = IpcRequest::WireGuardConnect { tunnel: tunnel.to_string() };
+        match self.send_request(&req).await? {
+            IpcResponse::Ok { message } => Ok(message),
+            other => Err(anyhow!("Unexpected response to WireGuardConnect: {:?}", other)),
+        }
+    }
+
+    pub async fn wireguard_disconnect(&self, tunnel: &str) -> Result<String> {
+        let req = IpcRequest::WireGuardDisconnect { tunnel: tunnel.to_string() };
+        match self.send_request(&req).await? {
+            IpcResponse::Ok { message } => Ok(message),
+            other => Err(anyhow!("Unexpected response to WireGuardDisconnect: {:?}", other)),
+        }
+    }
+
+    pub async fn wireguard_toggle(&self, tunnel: &str) -> Result<crate::engine::wireguard::WireGuardState> {
+        let req = IpcRequest::WireGuardToggle { tunnel: tunnel.to_string() };
+        match self.send_request(&req).await? {
+            IpcResponse::WireGuardStatus { state, .. } => Ok(state),
+            other => Err(anyhow!("Unexpected response to WireGuardToggle: {:?}", other)),
+        }
+    }
+
+    pub async fn add_route(&self, ip: &str, router: &str, iface: &str) -> Result<String> {
+        let req = IpcRequest::AddRoute {
+            ip: ip.to_string(),
+            router: router.to_string(),
+            iface: iface.to_string(),
+        };
+        match self.send_request(&req).await? {
+            IpcResponse::Ok { message } => Ok(message),
+            other => Err(anyhow!("Unexpected response to AddRoute: {:?}", other)),
+        }
+    }
+
+    pub async fn delete_route(&self, ip: &str, router: &str, iface: &str) -> Result<String> {
+        let req = IpcRequest::DeleteRoute {
+            ip: ip.to_string(),
+            router: router.to_string(),
+            iface: iface.to_string(),
+        };
+        match self.send_request(&req).await? {
+            IpcResponse::Ok { message } => Ok(message),
+            other => Err(anyhow!("Unexpected response to DeleteRoute: {:?}", other)),
+        }
+    }
+}

@@ -1,16 +1,16 @@
 use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 pub const FLOWSEAL_VERSION: &str = "1.9.9c";
 pub const FLOWSEAL_ZIP_URL: &str = "https://github.com/Flowseal/zapret-discord-youtube/releases/download/1.9.9c/zapret-discord-youtube-1.9.9c.zip";
 pub const FLOWSEAL_ZIP_SHA256: &str = "6064e4b26ed7358961a0b978fbb6263b119d8d7a5a06bb4a6454aeb855cf63e9";
 
-pub const TPWS_MACOS_ARM64_URL: &str = "https://raw.githubusercontent.com/by-sonic/unblock-pro/main/bin/darwin/tpws_arm64";
-pub const TPWS_MACOS_X64_URL: &str = "https://raw.githubusercontent.com/by-sonic/unblock-pro/main/bin/darwin/tpws_x64";
-pub const TPWS_MACOS_UNIVERSAL_URL: &str = "https://raw.githubusercontent.com/by-sonic/unblock-pro/main/bin/darwin/tpws";
+pub const ZAPRET_VERSION: &str = "v72.13";
+pub const ZAPRET_MACOS_ZIP_URL: &str = "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.zip";
+pub const ZAPRET_MACOS_ZIP_SHA256: &str = "c493e33a0dc4eba23a8686efdaba55f59755ad6ade3564aebd9d13f4c65e2e0c";
 
 pub struct BinaryManager {
     bin_dir: PathBuf,
@@ -114,40 +114,70 @@ impl BinaryManager {
     }
 
     async fn download_macos_tpws(&self) -> Result<()> {
-        let arch = std::env::consts::ARCH;
-        let url = match arch {
-            "aarch64" => TPWS_MACOS_ARM64_URL,
-            "x86_64" => TPWS_MACOS_X64_URL,
-            _ => TPWS_MACOS_UNIVERSAL_URL,
-        };
-
         let target_path = self.get_executable_path();
-        println!("⬇️  Downloading tpws ({}) from {}...", arch, url);
+        println!("⬇️  Downloading official zapret release ({}) for macOS from {}...", ZAPRET_VERSION, ZAPRET_MACOS_ZIP_URL);
 
-        let response = reqwest::get(url).await
-            .with_context(|| format!("Failed to download tpws from {}", url))?;
+        let response = reqwest::get(ZAPRET_MACOS_ZIP_URL).await
+            .with_context(|| format!("Failed to download zapret from {}", ZAPRET_MACOS_ZIP_URL))?;
 
         if !response.status().is_success() {
-            // Fallback to universal binary
-            println!("⚠️ Specific arch binary not found, trying universal tpws...");
-            let fallback_resp = reqwest::get(TPWS_MACOS_UNIVERSAL_URL).await?;
-            if !fallback_resp.status().is_success() {
-                return Err(anyhow!("HTTP error downloading tpws: {}", fallback_resp.status()));
-            }
-            let bytes = fallback_resp.bytes().await?;
-            fs::write(&target_path, bytes)?;
+            return Err(anyhow!("HTTP error downloading zapret: {}", response.status()));
+        }
+
+        let bytes = response.bytes().await?;
+
+        // Security: Verify SHA-256 hash before extracting/executing anything
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let hash = hex::encode(hasher.finalize());
+
+        if ZAPRET_MACOS_ZIP_SHA256 == "MUST_BE_SET_BEFORE_RELEASE" {
+            // First-run bootstrap: print the hash so the developer can hardcode it
+            println!("🔒 SECURITY NOTICE: macOS zapret zip SHA256 = {}", hash);
+            println!("   ⚠️ Please hardcode this hash into ZAPRET_MACOS_ZIP_SHA256 before release!");
+        } else if hash.to_lowercase() != ZAPRET_MACOS_ZIP_SHA256.to_lowercase() {
+            return Err(anyhow!(
+                "SHA-256 mismatch for zapret macOS bundle! Expected {}, got {}. Download may be corrupted or tampered with.",
+                ZAPRET_MACOS_ZIP_SHA256,
+                hash
+            ));
         } else {
-            let bytes = response.bytes().await?;
-            fs::write(&target_path, bytes)?;
+            println!("🔒 SHA-256 verified successfully ({})", &hash[..16]);
+        }
+
+        let reader = io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(reader)
+            .map_err(|e| anyhow!("Failed to read zapret zip archive: {}", e))?;
+
+        let mut found = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let file_name = match file.enclosed_name() {
+                Some(p) => p.to_owned(),
+                None => continue,
+            };
+
+            let name_str = file_name.to_string_lossy();
+            if name_str.ends_with("binaries/mac64/tpws") || name_str.ends_with("mac64/tpws") {
+                let mut outfile = File::create(&target_path)?;
+                io::copy(&mut file, &mut outfile)?;
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            return Err(anyhow!("Could not locate binaries/mac64/tpws within zapret zip archive"));
         }
 
         #[cfg(unix)]
         self.set_executable_permissions(&target_path)?;
 
-        println!("✅ tpws installed to {:?}", target_path);
+        println!("✅ tpws universal binary installed to {:?}", target_path);
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn download_windows_bundle(&self) -> Result<()> {
         println!("⬇️  Downloading Flowseal {} bundle from {}...", FLOWSEAL_VERSION, FLOWSEAL_ZIP_URL);
         let response = reqwest::get(FLOWSEAL_ZIP_URL).await

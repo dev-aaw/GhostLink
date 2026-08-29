@@ -107,7 +107,7 @@ impl Default for EngineConfig {
         let base_dir = PathBuf::from(home).join(".ghostlink");
         Self {
             base_dir,
-            socks_port: 1080,
+            socks_port: 10808,
             apply_system_proxy: true,
         }
     }

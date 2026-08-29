@@ -65,7 +65,9 @@ fbcdn.net
 twitter.com
 x.com
 t.co
-twimg.com"#;
+twimg.com
+wikileaks.org
+www.wikileaks.org"#;
 
 pub const HOST_LIST_EXCLUDE: &str = r#"yandex.ru
 ya.ru
@@ -155,6 +157,8 @@ impl StrategyManager {
                 platform: Platform::MacOS,
                 args: vec![
                     format!("--port={}", socks_port),
+                    "--bind-addr=127.0.0.1".to_string(),
+                    "--maxconn=512".to_string(),
                     "--socks".to_string(),
                     "--split-pos=1,midsld".to_string(),
                     "--disorder".to_string(),
@@ -168,6 +172,8 @@ impl StrategyManager {
                 platform: Platform::MacOS,
                 args: vec![
                     format!("--port={}", socks_port),
+                    "--bind-addr=127.0.0.1".to_string(),
+                    "--maxconn=512".to_string(),
                     "--socks".to_string(),
                     "--split-tls=sni".to_string(),
                     "--disorder".to_string(),
@@ -181,6 +187,8 @@ impl StrategyManager {
                 platform: Platform::MacOS,
                 args: vec![
                     format!("--port={}", socks_port),
+                    "--bind-addr=127.0.0.1".to_string(),
+                    "--maxconn=512".to_string(),
                     "--socks".to_string(),
                     "--split-pos=1".to_string(),
                     "--disorder".to_string(),
@@ -194,6 +202,8 @@ impl StrategyManager {
                 platform: Platform::MacOS,
                 args: vec![
                     format!("--port={}", socks_port),
+                    "--bind-addr=127.0.0.1".to_string(),
+                    "--maxconn=512".to_string(),
                     "--socks".to_string(),
                     "--oob".to_string(),
                     format!("--hostlist={}", general_list),
@@ -206,6 +216,8 @@ impl StrategyManager {
                 platform: Platform::MacOS,
                 args: vec![
                     format!("--port={}", socks_port),
+                    "--bind-addr=127.0.0.1".to_string(),
+                    "--maxconn=512".to_string(),
                     "--socks".to_string(),
                     "--split-http-req=method".to_string(),
                     "--split-tls=sni".to_string(),
