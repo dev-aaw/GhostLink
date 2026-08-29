@@ -12,5 +12,6 @@ pub use engine::{
     strategies::StrategyManager,
     types::{EngineConfig, EngineState, Platform, ProbeResult, ProbeRule, ProbeSummary, ProbeTier, Strategy},
     wireguard::{WireGuardManager, WireGuardState, WireGuardTunnelInfo},
+    silent_command,
     UnblockEngine,
 };

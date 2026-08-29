@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use crate::engine::silent_command;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WireGuardState {
@@ -24,7 +25,7 @@ impl WireGuardManager {
     pub fn list_tunnels() -> Vec<WireGuardTunnelInfo> {
         #[cfg(target_os = "macos")]
         {
-            let output = std::process::Command::new("scutil")
+            let output = silent_command("scutil")
                 .args(["--nc", "list"])
                 .output();
 
@@ -82,7 +83,7 @@ impl WireGuardManager {
             }
 
             // Also check running Windows services
-            let output = std::process::Command::new("sc.exe")
+            let output = silent_command("sc.exe")
                 .args(["query", "type=", "service", "state=", "all"])
                 .output();
 
@@ -125,7 +126,7 @@ impl WireGuardManager {
     pub fn status(tunnel_name: &str) -> WireGuardState {
         #[cfg(target_os = "macos")]
         {
-            let output = std::process::Command::new("scutil")
+            let output = silent_command("scutil")
                 .args(["--nc", "status", tunnel_name])
                 .output();
 
@@ -146,7 +147,7 @@ impl WireGuardManager {
         #[cfg(target_os = "windows")]
         {
             let svc_name = format!("WireGuardTunnel${}", tunnel_name);
-            let output = std::process::Command::new("sc.exe")
+            let output = silent_command("sc.exe")
                 .args(["query", &svc_name])
                 .output();
 
@@ -177,7 +178,7 @@ impl WireGuardManager {
         #[cfg(target_os = "macos")]
         {
             use anyhow::Context;
-            let status = std::process::Command::new("scutil")
+            let status = silent_command("scutil")
                 .args(["--nc", "start", tunnel_name])
                 .status()
                 .with_context(|| format!("Failed to start WireGuard tunnel '{}'", tunnel_name))?;
@@ -194,7 +195,7 @@ impl WireGuardManager {
             let conf_plain = format!(r"C:\Program Files\WireGuard\Data\Configurations\{}.conf", tunnel_name);
 
             // If service already exists, start it
-            let status = std::process::Command::new("net.exe")
+            let status = silent_command("net.exe")
                 .args(["start", &svc_name])
                 .status();
 
@@ -213,7 +214,7 @@ impl WireGuardManager {
 
             let wg_exe = r"C:\Program Files\WireGuard\wireguard.exe";
             if std::path::Path::new(wg_exe).exists() {
-                let status = std::process::Command::new(wg_exe)
+                let status = silent_command(wg_exe)
                     .args(["/installtunnelservice", &conf_path])
                     .status()?;
 
@@ -237,7 +238,7 @@ impl WireGuardManager {
         #[cfg(target_os = "macos")]
         {
             use anyhow::Context;
-            let status = std::process::Command::new("scutil")
+            let status = silent_command("scutil")
                 .args(["--nc", "stop", tunnel_name])
                 .status()
                 .with_context(|| format!("Failed to stop WireGuard tunnel '{}'", tunnel_name))?;
@@ -251,13 +252,13 @@ impl WireGuardManager {
         {
             let wg_exe = r"C:\Program Files\WireGuard\wireguard.exe";
             if std::path::Path::new(wg_exe).exists() {
-                let _ = std::process::Command::new(wg_exe)
+                let _ = silent_command(wg_exe)
                     .args(["/uninstalltunnelservice", tunnel_name])
                     .status();
             }
 
             let svc_name = format!("WireGuardTunnel${}", tunnel_name);
-            let _ = std::process::Command::new("net.exe")
+            let _ = silent_command("net.exe")
                 .args(["stop", &svc_name])
                 .status();
 

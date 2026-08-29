@@ -547,7 +547,7 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
             }
             #[cfg(target_os = "windows")]
             {
-                let _ = std::process::Command::new("route")
+                let _ = ghostlink_engine::silent_command("route.exe")
                     .args(["add", &ip, "mask", "255.255.255.255", &router])
                     .status();
             }
@@ -580,7 +580,7 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
             }
             #[cfg(target_os = "windows")]
             {
-                let _ = std::process::Command::new("route")
+                let _ = ghostlink_engine::silent_command("route.exe")
                     .args(["delete", &ip])
                     .status();
             }
@@ -628,7 +628,7 @@ fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32)> {
 
 #[cfg(windows)]
 fn is_windows_admin() -> bool {
-    let output = std::process::Command::new("net")
+    let output = ghostlink_engine::silent_command("net.exe")
         .args(["session"])
         .output();
     if let Ok(out) = output {

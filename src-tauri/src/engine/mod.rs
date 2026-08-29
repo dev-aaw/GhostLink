@@ -32,6 +32,16 @@ pub use wireguard::{WireGuardManager, WireGuardState};
 pub use autostart::AutoStartManager;
 pub use service::ServiceManager;
 
+pub fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    cmd
+}
+
 pub struct UnblockEngine {
     config: EngineConfig,
     state: EngineState,

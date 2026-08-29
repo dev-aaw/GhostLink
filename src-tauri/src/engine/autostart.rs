@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::path::Path;
-use std::process::Command;
+use crate::engine::silent_command;
 
 pub struct AutoStartManager;
 
@@ -21,7 +21,7 @@ impl AutoStartManager {
         }
         #[cfg(target_os = "windows")]
         {
-            let output = Command::new("reg.exe")
+            let output = silent_command("reg.exe")
                 .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GhostLink"])
                 .output();
             if let Ok(out) = output {
@@ -66,7 +66,7 @@ impl AutoStartManager {
             );
 
             std::fs::write(&plist_path, plist_content)?;
-            let _ = Command::new("launchctl")
+            let _ = silent_command("launchctl")
                 .args(["load", "-w", &plist_path.to_string_lossy()])
                 .status();
 
@@ -75,7 +75,7 @@ impl AutoStartManager {
         #[cfg(target_os = "windows")]
         {
             let exe_str = format!("\"{}\"", app_executable_path.to_string_lossy());
-            let _ = Command::new("reg.exe")
+            let _ = silent_command("reg.exe")
                 .args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GhostLink", "/t", "REG_SZ", "/d", &exe_str, "/f"])
                 .status();
             Ok(())
@@ -91,7 +91,7 @@ impl AutoStartManager {
         {
             let plist_path = Self::plist_path();
             if plist_path.exists() {
-                let _ = Command::new("launchctl")
+                let _ = silent_command("launchctl")
                     .args(["unload", "-w", &plist_path.to_string_lossy()])
                     .status();
                 let _ = std::fs::remove_file(&plist_path);
@@ -100,7 +100,7 @@ impl AutoStartManager {
         }
         #[cfg(target_os = "windows")]
         {
-            let _ = Command::new("reg.exe")
+            let _ = silent_command("reg.exe")
                 .args(["delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GhostLink", "/f"])
                 .status();
             Ok(())

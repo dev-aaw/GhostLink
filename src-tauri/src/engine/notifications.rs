@@ -1,5 +1,6 @@
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use crate::engine::silent_command;
 
 /// Sends a native desktop notification on macOS and Windows.
 /// Security: Uses stdin piping to avoid shell argument injection.
@@ -16,7 +17,7 @@ pub fn notify(title: &str, message: &str) {
         );
 
         // Pipe script via stdin rather than -e to avoid shell argument parsing issues
-        if let Ok(mut child) = Command::new("osascript")
+        if let Ok(mut child) = silent_command("osascript")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -47,7 +48,7 @@ $notifier.Show($notification)
             safe_title, safe_message
         );
 
-        if let Ok(mut child) = Command::new("powershell.exe")
+        if let Ok(mut child) = silent_command("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())

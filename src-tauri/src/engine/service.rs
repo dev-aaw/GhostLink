@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
-use std::process::Command;
-
+use crate::engine::silent_command;
 use crate::engine::ipc::DaemonClient;
 
 pub const PLIST_LABEL: &str = "com.ghostlink.helper";
@@ -40,7 +39,7 @@ impl ServiceManager {
         }
         #[cfg(target_os = "windows")]
         {
-            let output = Command::new("schtasks.exe")
+            let output = silent_command("schtasks.exe")
                 .args(["/Query", "/TN", WIN_TASK_NAME])
                 .output();
             if let Ok(out) = output {
@@ -103,11 +102,11 @@ impl ServiceManager {
 
             let run_cmd = |program: &str, args: &[&str]| -> Result<()> {
                 let status = if is_root {
-                    Command::new(program).args(args).status()
+                    silent_command(program).args(args).status()
                 } else {
                     let mut sudo_args = vec![program];
                     sudo_args.extend_from_slice(args);
-                    Command::new("sudo").args(&sudo_args).status()
+                    silent_command("sudo").args(&sudo_args).status()
                 };
                 match status {
                     Ok(s) if s.success() => Ok(()),
@@ -150,9 +149,9 @@ impl ServiceManager {
 
             // 5. Unload previous instance if loaded
             if is_root {
-                let _ = Command::new("launchctl").args(["unload", "-w", PLIST_PATH]).status();
+                let _ = silent_command("launchctl").args(["unload", "-w", PLIST_PATH]).status();
             } else {
-                let _ = Command::new("sudo").args(["launchctl", "unload", "-w", PLIST_PATH]).status();
+                let _ = silent_command("sudo").args(["launchctl", "unload", "-w", PLIST_PATH]).status();
             }
 
             // 6. Load daemon
@@ -189,7 +188,7 @@ impl ServiceManager {
             let daemon_path_str = source_daemon_bin.to_string_lossy();
 
             // 1. Create elevated task scheduled to run with HIGHEST available privileges on logon
-            let status = Command::new("schtasks.exe")
+            let status = silent_command("schtasks.exe")
                 .args([
                     "/Create",
                     "/TN", WIN_TASK_NAME,
@@ -205,9 +204,17 @@ impl ServiceManager {
                 return Err(anyhow!("schtasks.exe /Create failed with code {:?}", status.code()));
             }
 
-            // 2. Start the task immediately
+            // 2. Configure task power settings (allow running on batteries without stopping)
+            let _ = silent_command("powershell.exe")
+                .args([
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                    "$t = Get-ScheduledTask -TaskName 'GhostLinkService' -ErrorAction SilentlyContinue; if ($t) { $t.Settings.DisallowStartIfOnBatteries = $false; $t.Settings.StopIfGoingOnBatteries = $false; $t.Settings.ExecutionTimeLimit = 'PT0S'; Set-ScheduledTask -InputObject $t -ErrorAction SilentlyContinue }"
+                ])
+                .status();
+
+            // 3. Start the task immediately
             println!("🚀 Starting GhostLink Windows background service...");
-            let _ = Command::new("schtasks.exe")
+            let _ = silent_command("schtasks.exe")
                 .args(["/Run", "/TN", WIN_TASK_NAME])
                 .status();
 
@@ -248,11 +255,11 @@ impl ServiceManager {
 
             let run_cmd = |program: &str, args: &[&str]| {
                 if is_root {
-                    let _ = Command::new(program).args(args).status();
+                    let _ = silent_command(program).args(args).status();
                 } else {
                     let mut sudo_args = vec![program];
                     sudo_args.extend_from_slice(args);
-                    let _ = Command::new("sudo").args(&sudo_args).status();
+                    let _ = silent_command("sudo").args(&sudo_args).status();
                 }
             };
 
@@ -283,11 +290,11 @@ impl ServiceManager {
                 let _ = self.daemon_client.shutdown_daemon().await;
             }
 
-            let _ = Command::new("schtasks.exe")
+            let _ = silent_command("schtasks.exe")
                 .args(["/End", "/TN", WIN_TASK_NAME])
                 .status();
 
-            let _ = Command::new("schtasks.exe")
+            let _ = silent_command("schtasks.exe")
                 .args(["/Delete", "/TN", WIN_TASK_NAME, "/F"])
                 .status();
 
