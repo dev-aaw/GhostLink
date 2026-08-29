@@ -18,8 +18,18 @@ Thumbs.db
 *.swp
 *.swo
 
-# GhostLink local runtime data (root only)
+# GhostLink local runtime & dynamic data (root only)
 /bin/
 /lists/
 .ghostlink/
 /temp/
+smart_routing.json
+*.log
+
+# Sensitive WireGuard / Tunnel Credentials (NEVER commit secrets!)
+*.conf
+*.key
+wg*.conf
+privatekey
+publickey
+presharedkey

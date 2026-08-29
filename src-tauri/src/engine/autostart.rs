@@ -6,6 +6,7 @@ use std::process::Command;
 pub struct AutoStartManager;
 
 impl AutoStartManager {
+    #[cfg(target_os = "macos")]
     pub fn plist_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(home)
@@ -15,17 +16,36 @@ impl AutoStartManager {
     }
 
     pub fn is_enabled() -> bool {
-        Self::plist_path().exists()
+        #[cfg(target_os = "macos")]
+        {
+            Self::plist_path().exists()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let output = Command::new("reg.exe")
+                .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GhostLink"])
+                .output();
+            if let Ok(out) = output {
+                return out.status.success();
+            }
+            false
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            false
+        }
     }
 
     pub fn enable(app_executable_path: &Path) -> Result<()> {
-        let plist_path = Self::plist_path();
-        if let Some(parent) = plist_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        #[cfg(target_os = "macos")]
+        {
+            let plist_path = Self::plist_path();
+            if let Some(parent) = plist_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
 
-        let plist_content = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
+            let plist_content = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -43,26 +63,53 @@ impl AutoStartManager {
     <string>Interactive</string>
 </dict>
 </plist>"#,
-            app_executable_path.to_string_lossy()
-        );
+                app_executable_path.to_string_lossy()
+            );
 
-        fs::write(&plist_path, plist_content)?;
-        let _ = Command::new("launchctl")
-            .args(["load", "-w", &plist_path.to_string_lossy()])
-            .status();
+            fs::write(&plist_path, plist_content)?;
+            let _ = Command::new("launchctl")
+                .args(["load", "-w", &plist_path.to_string_lossy()])
+                .status();
 
-        Ok(())
+            Ok(())
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let exe_str = format!("\"{}\"", app_executable_path.to_string_lossy());
+            let _ = Command::new("reg.exe")
+                .args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GhostLink", "/t", "REG_SZ", "/d", &exe_str, "/f"])
+                .status();
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Ok(())
+        }
     }
 
     pub fn disable() -> Result<()> {
-        let plist_path = Self::plist_path();
-        if plist_path.exists() {
-            let _ = Command::new("launchctl")
-                .args(["unload", "-w", &plist_path.to_string_lossy()])
-                .status();
-            let _ = fs::remove_file(&plist_path);
+        #[cfg(target_os = "macos")]
+        {
+            let plist_path = Self::plist_path();
+            if plist_path.exists() {
+                let _ = Command::new("launchctl")
+                    .args(["unload", "-w", &plist_path.to_string_lossy()])
+                    .status();
+                let _ = fs::remove_file(&plist_path);
+            }
+            Ok(())
         }
-        Ok(())
+        #[cfg(target_os = "windows")]
+        {
+            let _ = Command::new("reg.exe")
+                .args(["delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "GhostLink", "/f"])
+                .status();
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Ok(())
+        }
     }
 
     pub fn toggle(app_executable_path: &Path) -> Result<bool> {

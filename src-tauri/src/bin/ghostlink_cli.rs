@@ -454,18 +454,19 @@ async fn main() -> Result<()> {
                     // Locate current target binary for ghostlink_daemon
                     let current_exe = std::env::current_exe()?;
                     let bin_dir = current_exe.parent().unwrap();
-                    let daemon_bin = bin_dir.join("ghostlink_daemon");
+                    let exe_name = if cfg!(target_os = "windows") { "ghostlink_daemon.exe" } else { "ghostlink_daemon" };
+                    let daemon_bin = bin_dir.join(exe_name);
 
                     let target_bin = if daemon_bin.exists() {
                         daemon_bin
                     } else {
                         // Fallback to debug/release target
                         let base_target = current_exe.parent().unwrap().parent().unwrap();
-                        let debug_bin = base_target.join("debug").join("ghostlink_daemon");
+                        let debug_bin = base_target.join("debug").join(exe_name);
                         if debug_bin.exists() {
                             debug_bin
                         } else {
-                            base_target.join("release").join("ghostlink_daemon")
+                            base_target.join("release").join(exe_name)
                         }
                     };
 
@@ -487,9 +488,8 @@ async fn main() -> Result<()> {
                 }
 
                 ServiceCommands::Status => {
-                    println!("\n🔍 LaunchDaemon Plist Installed: {}", if sm.is_plist_installed() { "YES".green() } else { "NO".yellow() });
-                    println!("🔍 Launchctl Service Loaded: {}", if sm.is_launchctl_loaded() { "YES".green() } else { "NO".yellow() });
-                    println!("📡 IPC Socket Path: {}", sm.client().socket_path().to_string_lossy().cyan());
+                    println!("\n🔍 Helper Service Installed: {}", if sm.is_service_installed() { "YES".green() } else { "NO".yellow() });
+                    println!("📡 IPC Transport: {}", if cfg!(target_os = "windows") { "127.0.0.1:49281 (TCP Loopback)".cyan() } else { sm.client().socket_path().to_string_lossy().cyan() });
                     
                     if sm.is_daemon_running().await {
                         let (_ver, is_root, pid) = sm.client().ping().await?;

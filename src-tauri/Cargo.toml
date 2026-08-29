@@ -36,9 +36,14 @@ regex = "1.10"
 clap = { version = "4.5", features = ["derive"] }
 colored = "2.1"
 zip = { version = "2.1", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 objc = "0.2"
 cocoa = "0.26"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows native platform support
 
 [profile.release]
 opt-level = 3

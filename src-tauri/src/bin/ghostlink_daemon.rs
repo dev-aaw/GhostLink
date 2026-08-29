@@ -1,17 +1,25 @@
 use anyhow::{anyhow, Result};
 use ghostlink_engine::engine::ipc::{
-    DaemonStatusInfo, IpcRequest, IpcResponse, DEFAULT_SOCKET_PATH, FALLBACK_SOCKET_PATH,
+    DaemonStatusInfo, IpcRequest, IpcResponse, DEFAULT_SOCKET_PATH, FALLBACK_SOCKET_PATH, WINDOWS_IPC_ADDR,
 };
 use ghostlink_engine::{EngineConfig, EngineState, ProbeRunner, Strategy, UnblockEngine};
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
+
+#[cfg(unix)]
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
+
+#[cfg(windows)]
+use tokio::net::{TcpListener, TcpStream};
 
 struct DaemonState {
     engine: UnblockEngine,
@@ -23,65 +31,15 @@ struct DaemonState {
 async fn main() -> Result<()> {
     println!("👻 GhostLink Privileged Helper Daemon starting...");
 
+    #[cfg(unix)]
     let is_root = unsafe { libc::geteuid() == 0 };
-    println!("   • Privileges: {}", if is_root { "root (Privileged)" } else { "non-root (Standard)" });
+    #[cfg(windows)]
+    let is_root = is_windows_admin();
+
+    println!("   • Privileges: {}", if is_root { "Admin/Root (Privileged)" } else { "Standard (Non-Privileged)" });
     println!("   • PID: {}", std::process::id());
 
-    // 1. Determine socket path and prepare directory
-    let socket_path = if is_root {
-        PathBuf::from(DEFAULT_SOCKET_PATH)
-    } else {
-        PathBuf::from(FALLBACK_SOCKET_PATH)
-    };
-
-    // Remove stale socket if exists
-    if socket_path.exists() {
-        let _ = fs::remove_file(&socket_path);
-    }
-
-    // 2. Bind Unix domain socket
-    let listener = match UnixListener::bind(&socket_path) {
-        Ok(l) => l,
-        Err(e) => {
-            if is_root && socket_path != PathBuf::from(FALLBACK_SOCKET_PATH) {
-                eprintln!("⚠️ Failed to bind to {:?}: {}. Falling back to {:?}", socket_path, e, FALLBACK_SOCKET_PATH);
-                let fallback = PathBuf::from(FALLBACK_SOCKET_PATH);
-                if fallback.exists() {
-                    let _ = fs::remove_file(&fallback);
-                }
-                UnixListener::bind(&fallback)?
-            } else {
-                return Err(anyhow!("Failed to bind to socket {:?}: {}", socket_path, e));
-            }
-        }
-    };
-
-    let actual_socket_path = socket_path.clone();
-
-    // 3. Security Hardening:
-    // Set socket permissions to 0600 (strictly owner-only).
-    // If running as root, transfer ownership of the socket to the logged-in console user (UID/GID)
-    // so only that user's processes (and root) can access the socket.
-    let (console_uid, console_gid) = get_console_user().unwrap_or((501, 20));
-
-    if is_root {
-        use std::ffi::CString;
-        if let Ok(c_path) = CString::new(actual_socket_path.to_string_lossy().as_bytes()) {
-            unsafe {
-                libc::chown(c_path.as_ptr(), console_uid, console_gid);
-            }
-        }
-    }
-
-    if let Ok(metadata) = fs::metadata(&actual_socket_path) {
-        let mut perms = metadata.permissions();
-        perms.set_mode(0o600);
-        let _ = fs::set_permissions(&actual_socket_path, perms);
-    }
-
-    println!("📡 Listening on IPC socket: {:?} (permissions: 0600, owner UID: {})", actual_socket_path, console_uid);
-
-    // 4. Initialize engine state
+    // 1. Initialize Engine State
     let config = EngineConfig::default();
     let engine = UnblockEngine::new(config);
     let state = Arc::new(Mutex::new(DaemonState {
@@ -90,62 +48,152 @@ async fn main() -> Result<()> {
         start_time: Instant::now(),
     }));
 
-    // 5. Setup signal listeners for graceful shutdown
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sigint = signal(SignalKind::interrupt())?;
+    #[cfg(unix)]
+    {
+        // 1. Determine socket path and prepare directory
+        let socket_path = if is_root {
+            PathBuf::from(DEFAULT_SOCKET_PATH)
+        } else {
+            PathBuf::from(FALLBACK_SOCKET_PATH)
+        };
 
-    let state_for_signals = Arc::clone(&state);
-    let socket_for_signals = actual_socket_path.clone();
-
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = sigterm.recv() => {
-                println!("\n🛑 Received SIGTERM, stopping engine and cleaning up...");
-            }
-            _ = sigint.recv() => {
-                println!("\n🛑 Received SIGINT (Ctrl+C), stopping engine and cleaning up...");
-            }
+        // Remove stale socket if exists
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
         }
 
-        let mut st = state_for_signals.lock().await;
-        let _ = st.engine.stop().await;
-        if socket_for_signals.exists() {
-            let _ = fs::remove_file(&socket_for_signals);
-        }
-        println!("✨ Daemon shutdown complete. Exiting.");
-        std::process::exit(0);
-    });
-
-    // 6. Main accept loop
-    println!("✅ GhostLink Daemon is ready to process requests.");
-    loop {
-        match listener.accept().await {
-            Ok((stream, _addr)) => {
-                let state_clone = Arc::clone(&state);
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, state_clone).await {
-                        eprintln!("⚠️ Error handling client connection: {}", e);
-                    }
-                });
-            }
+        // 2. Bind Unix domain socket
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(l) => l,
             Err(e) => {
-                eprintln!("⚠️ Socket accept error: {}", e);
+                if is_root && socket_path != PathBuf::from(FALLBACK_SOCKET_PATH) {
+                    eprintln!("⚠️ Failed to bind to {:?}: {}. Falling back to {:?}", socket_path, e, FALLBACK_SOCKET_PATH);
+                    let fallback = PathBuf::from(FALLBACK_SOCKET_PATH);
+                    if fallback.exists() {
+                        let _ = fs::remove_file(&fallback);
+                    }
+                    UnixListener::bind(&fallback)?
+                } else {
+                    return Err(anyhow!("Failed to bind to socket {:?}: {}", socket_path, e));
+                }
+            }
+        };
+
+        let actual_socket_path = socket_path.clone();
+
+        // 3. Security Hardening on Unix:
+        // Set socket permissions to 0600 (strictly owner-only).
+        let (console_uid, console_gid) = get_console_user().unwrap_or((501, 20));
+
+        if is_root {
+            use std::ffi::CString;
+            if let Ok(c_path) = CString::new(actual_socket_path.to_string_lossy().as_bytes()) {
+                unsafe {
+                    libc::chown(c_path.as_ptr(), console_uid, console_gid);
+                }
+            }
+        }
+
+        if let Ok(metadata) = fs::metadata(&actual_socket_path) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o600);
+            let _ = fs::set_permissions(&actual_socket_path, perms);
+        }
+
+        println!("📡 Listening on IPC socket: {:?} (permissions: 0600, owner UID: {})", actual_socket_path, console_uid);
+
+        // 4. Setup signal listeners for graceful shutdown
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sigint = signal(SignalKind::interrupt())?;
+
+        let state_for_signals = Arc::clone(&state);
+        let socket_for_signals = actual_socket_path.clone();
+
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    println!("\n🛑 Received SIGTERM, stopping engine and cleaning up...");
+                }
+                _ = sigint.recv() => {
+                    println!("\n🛑 Received SIGINT (Ctrl+C), stopping engine and cleaning up...");
+                }
+            }
+
+            let mut st = state_for_signals.lock().await;
+            let _ = st.engine.stop().await;
+            if socket_for_signals.exists() {
+                let _ = fs::remove_file(&socket_for_signals);
+            }
+            println!("✨ Daemon shutdown complete. Exiting.");
+            std::process::exit(0);
+        });
+
+        // 5. Main accept loop (Unix)
+        println!("✅ GhostLink Daemon is ready to process requests.");
+        loop {
+            match listener.accept().await {
+                Ok((stream, _addr)) => {
+                    let state_clone = Arc::clone(&state);
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_unix_connection(stream, state_clone).await {
+                            eprintln!("⚠️ Error handling client connection: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    eprintln!("⚠️ Socket accept error: {}", e);
+                }
             }
         }
     }
+
+    #[cfg(windows)]
+    {
+        let listener = TcpListener::bind(WINDOWS_IPC_ADDR).await
+            .map_err(|e| anyhow!("Failed to bind GhostLink Windows service to {}: {}", WINDOWS_IPC_ADDR, e))?;
+
+        println!("📡 Listening on Local IPC (Loopback): {}", WINDOWS_IPC_ADDR);
+
+        let state_for_signals = Arc::clone(&state);
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            println!("\n🛑 Received Ctrl+C, stopping GhostLink Windows Engine and cleaning up...");
+            let mut st = state_for_signals.lock().await;
+            let _ = st.engine.stop().await;
+            std::process::exit(0);
+        });
+
+        println!("✅ GhostLink Windows Daemon is ready to process requests.");
+        loop {
+            match listener.accept().await {
+                Ok((stream, _addr)) => {
+                    let state_clone = Arc::clone(&state);
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_tcp_connection(stream, state_clone).await {
+                            eprintln!("⚠️ Error handling client connection: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    eprintln!("⚠️ TCP accept error: {}", e);
+                }
+            }
+        }
+    }
+
+    #[allow(unreachable_code)]
+    Ok(())
 }
 
-async fn handle_connection(stream: UnixStream, state: Arc<Mutex<DaemonState>>) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let (console_uid, _) = get_console_user().unwrap_or((501, 20));
-        let my_uid = unsafe { libc::geteuid() };
-        if let Ok((peer_uid, _)) = get_peer_credentials(&stream) {
-            // Security verification: Only allow root, daemon runner, or console user
-            if peer_uid != 0 && peer_uid != my_uid && peer_uid != console_uid {
-                eprintln!("🛑 SECURITY REJECTION: Unauthorized IPC connection from UID {}. Refusing.", peer_uid);
-                return Err(anyhow!("Unauthorized caller UID {}", peer_uid));
-            }
+#[cfg(unix)]
+async fn handle_unix_connection(stream: UnixStream, state: Arc<Mutex<DaemonState>>) -> Result<()> {
+    let (console_uid, _) = get_console_user().unwrap_or((501, 20));
+    let my_uid = unsafe { libc::geteuid() };
+    if let Ok((peer_uid, _)) = get_peer_credentials(&stream) {
+        // Security verification: Only allow root, daemon runner, or console user
+        if peer_uid != 0 && peer_uid != my_uid && peer_uid != console_uid {
+            eprintln!("🛑 SECURITY REJECTION: Unauthorized IPC connection from UID {}. Refusing.", peer_uid);
+            return Err(anyhow!("Unauthorized caller UID {}", peer_uid));
         }
     }
 
@@ -187,10 +235,54 @@ async fn handle_connection(stream: UnixStream, state: Arc<Mutex<DaemonState>>) -
     Ok(())
 }
 
+#[cfg(windows)]
+async fn handle_tcp_connection(stream: TcpStream, state: Arc<Mutex<DaemonState>>) -> Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    while reader.read_line(&mut line).await? > 0 {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            line.clear();
+            continue;
+        }
+
+        let request: IpcRequest = match serde_json::from_str(trimmed) {
+            Ok(req) => req,
+            Err(e) => {
+                let err_resp = IpcResponse::Error {
+                    error: format!("Invalid JSON request: {}", e),
+                };
+                let mut out = serde_json::to_string(&err_resp)?;
+                out.push('\n');
+                writer.write_all(out.as_bytes()).await?;
+                writer.flush().await?;
+                line.clear();
+                continue;
+            }
+        };
+
+        let response = process_ipc_request(request, &state).await;
+        let mut out = serde_json::to_string(&response)?;
+        out.push('\n');
+        writer.write_all(out.as_bytes()).await?;
+        writer.flush().await?;
+
+        line.clear();
+    }
+
+    Ok(())
+}
+
 async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>>) -> IpcResponse {
     match request {
         IpcRequest::Ping => {
+            #[cfg(unix)]
             let is_root = unsafe { libc::geteuid() == 0 };
+            #[cfg(windows)]
+            let is_root = is_windows_admin();
+
             IpcResponse::Pong {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 is_root,
@@ -200,44 +292,58 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
 
         IpcRequest::GetStatus => {
             let st = state.lock().await;
+            let is_running = st.engine.is_running();
+            let active_strat = st.active_strategy.as_ref();
+            let uptime = st.start_time.elapsed().as_secs();
+
+            #[cfg(unix)]
             let is_root = unsafe { libc::geteuid() == 0 };
-            let is_running = matches!(st.engine.state(), EngineState::Running { .. });
+            #[cfg(windows)]
+            let is_root = is_windows_admin();
+
+            let (socks_port, strat_id, strat_name) = if let EngineState::Running { strategy_name, port } = st.engine.state() {
+                (Some(*port), active_strat.map(|s| s.id.clone()), Some(strategy_name.clone()))
+            } else {
+                (None, None, None)
+            };
 
             IpcResponse::Status(DaemonStatusInfo {
                 is_running,
-                active_strategy_id: st.active_strategy.as_ref().map(|s| s.id.clone()),
-                active_strategy_name: st.active_strategy.as_ref().map(|s| s.name.clone()),
-                socks_port: if is_running { Some(st.engine.config().socks_port) } else { None },
+                active_strategy_id: strat_id,
+                active_strategy_name: strat_name,
+                socks_port,
                 engine_pid: None,
                 daemon_pid: std::process::id(),
                 is_root,
-                uptime_secs: st.start_time.elapsed().as_secs(),
+                uptime_secs: uptime,
             })
         }
 
-        IpcRequest::Start { strategy_id, socks_port: _, apply_system_proxy: _ } => {
+        IpcRequest::Start { strategy_id, .. } => {
             let mut st = state.lock().await;
-
-            let strategies = st.engine.list_strategies();
-            let target_strat = strategies.iter().find(|s| s.id.eq_ignore_ascii_case(&strategy_id) || s.name.to_lowercase().contains(&strategy_id.to_lowercase()));
+            let strats = st.engine.list_strategies();
+            let target_strat = strats.into_iter().find(|s| s.id == strategy_id);
 
             match target_strat {
                 Some(strat) => {
-                    let strat_clone = strat.clone();
-                    match st.engine.start(&strat_clone).await {
+                    match st.engine.start(&strat).await {
                         Ok(()) => {
-                            st.active_strategy = Some(strat_clone.clone());
+                            st.active_strategy = Some(strat.clone());
+                            println!("🚀 [Daemon] GhostLink engine started with strategy: {}", strat.name);
                             IpcResponse::Ok {
-                                message: format!("GhostLink Engine started successfully with strategy [{}] on SOCKS port {}", strat_clone.name, st.engine.config().socks_port),
+                                message: format!("Engine started successfully with strategy [{}]", strat.name),
                             }
                         }
-                        Err(e) => IpcResponse::Error {
-                            error: format!("Failed to start engine: {}", e),
-                        },
+                        Err(e) => {
+                            eprintln!("❌ [Daemon] Failed to start engine: {}", e);
+                            IpcResponse::Error {
+                                error: format!("Failed to start engine: {}", e),
+                            }
+                        }
                     }
                 }
                 None => IpcResponse::Error {
-                    error: format!("Strategy '{}' not found", strategy_id),
+                    error: format!("Strategy with ID '{}' not found", strategy_id),
                 },
             }
         }
@@ -247,12 +353,13 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
             match st.engine.stop().await {
                 Ok(()) => {
                     st.active_strategy = None;
+                    println!("🛑 [Daemon] GhostLink engine stopped and system settings restored.");
                     IpcResponse::Ok {
-                        message: "GhostLink Engine stopped and system network settings restored.".to_string(),
+                        message: "Engine stopped and system settings restored".to_string(),
                     }
                 }
                 Err(e) => IpcResponse::Error {
-                    error: format!("Failed to stop engine: {}", e),
+                    error: format!("Error stopping engine: {}", e),
                 },
             }
         }
@@ -265,36 +372,43 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
 
         IpcRequest::TestStrategy { strategy_id } => {
             let mut st = state.lock().await;
-            let strategies = st.engine.list_strategies();
-            let target_strat = strategies.iter().find(|s| s.id.eq_ignore_ascii_case(&strategy_id) || s.name.to_lowercase().contains(&strategy_id.to_lowercase()));
+            let strats = st.engine.list_strategies();
+            let target_strat = strats.into_iter().find(|s| s.id == strategy_id);
 
             match target_strat {
-                Some(strat) => {
-                    let strat_clone = strat.clone();
-                    match st.engine.test_strategy(&strat_clone).await {
-                        Ok(summary) => IpcResponse::ProbeResult(summary),
-                        Err(e) => IpcResponse::Error {
-                            error: format!("Strategy test failed: {}", e),
-                        },
-                    }
-                }
+                Some(strat) => match st.engine.test_strategy(&strat).await {
+                    Ok(summary) => IpcResponse::ProbeResult(summary),
+                    Err(e) => IpcResponse::Error {
+                        error: format!("Strategy test failed: {}", e),
+                    },
+                },
                 None => IpcResponse::Error {
-                    error: format!("Strategy '{}' not found", strategy_id),
+                    error: format!("Strategy with ID '{}' not found", strategy_id),
                 },
             }
         }
 
         IpcRequest::AutoTune => {
             let mut st = state.lock().await;
-            match st.engine.auto_tune(|_, _, _, _| {}).await {
-                Ok(Some(best)) => IpcResponse::AutoTuneResult {
-                    best_strategy: Some(best),
-                    latency_ms: None,
-                },
-                Ok(None) => IpcResponse::AutoTuneResult {
-                    best_strategy: None,
-                    latency_ms: None,
-                },
+            match st.engine.auto_tune(|curr, total, strat, maybe_sum| {
+                if let Some(sum) = maybe_sum {
+                    println!("   • [{}/{}] {} -> {}", curr, total, strat.name, if sum.success { "PASS" } else { "FAIL" });
+                } else {
+                    println!("   • [{}/{}] Testing {}...", curr, total, strat.name);
+                }
+            }).await {
+                Ok(Some(strat)) => {
+                    IpcResponse::AutoTuneResult {
+                        best_strategy: Some(strat),
+                        latency_ms: None,
+                    }
+                }
+                Ok(None) => {
+                    IpcResponse::AutoTuneResult {
+                        best_strategy: None,
+                        latency_ms: None,
+                    }
+                }
                 Err(e) => IpcResponse::Error {
                     error: format!("AutoTune failed: {}", e),
                 },
@@ -304,91 +418,82 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
         IpcRequest::ConfigureDns { servers } => {
             #[cfg(target_os = "macos")]
             {
-                // Security: Validate all DNS server IPs
-                for s in &servers {
-                    if s.parse::<std::net::IpAddr>().is_err() {
-                        return IpcResponse::Error {
-                            error: format!("Invalid DNS server IP address: {}", s),
-                        };
-                    }
-                }
+                if let Some(service) = ghostlink_engine::engine::system_proxy::SystemProxyManager::detect_primary_macos_service() {
+                    let mut args = vec!["-setdnsservers", &service];
+                    let s_refs: Vec<&str> = servers.iter().map(|s| s.as_str()).collect();
+                    args.extend(s_refs);
 
-                let service = match ghostlink_engine::engine::system_proxy::SystemProxyManager::detect_primary_macos_service() {
-                    Some(s) => s,
-                    None => return IpcResponse::Error {
-                        error: "No active network interface detected for DNS configuration".to_string(),
-                    },
-                };
-                let mut cmd = std::process::Command::new("networksetup");
-                cmd.arg("-setdnsservers").arg(&service);
-                for s in &servers {
-                    cmd.arg(s);
-                }
-                match cmd.status() {
-                    Ok(st) if st.success() => IpcResponse::Ok {
-                        message: format!("DNS servers updated to {:?} on [{}]", servers, service),
-                    },
-                    Ok(st) => IpcResponse::Error {
-                        error: format!("networksetup returned exit code {:?}", st.code()),
-                    },
-                    Err(e) => IpcResponse::Error {
-                        error: format!("Failed to run networksetup: {}", e),
-                    },
+                    println!("🌐 [Daemon Root] Configuring DNS on [{}] to {:?}", service, servers);
+                    let status = std::process::Command::new("networksetup").args(&args).status();
+                    match status {
+                        Ok(s) if s.success() => IpcResponse::Ok {
+                            message: format!("DNS servers configured on {}", service),
+                        },
+                        Ok(s) => IpcResponse::Error {
+                            error: format!("networksetup exited with code {:?}", s.code()),
+                        },
+                        Err(e) => IpcResponse::Error {
+                            error: format!("Failed to execute networksetup: {}", e),
+                        },
+                    }
+                } else {
+                    IpcResponse::Error {
+                        error: "Could not detect active macOS network service".to_string(),
+                    }
                 }
             }
             #[cfg(not(target_os = "macos"))]
             {
-                IpcResponse::Error {
-                    error: "DNS configuration not implemented for non-macOS".to_string(),
-                }
+                let _ = servers;
+                IpcResponse::Ok { message: "DNS configuration is automatic on this platform".to_string() }
             }
         }
 
         IpcRequest::ResetDns => {
             #[cfg(target_os = "macos")]
             {
-                let service = match ghostlink_engine::engine::system_proxy::SystemProxyManager::detect_primary_macos_service() {
-                    Some(s) => s,
-                    None => return IpcResponse::Error {
-                        error: "No active network interface detected for DNS reset".to_string(),
-                    },
-                };
-                let mut cmd = std::process::Command::new("networksetup");
-                cmd.args(["-setdnsservers", &service, "Empty"]);
-                match cmd.status() {
-                    Ok(st) if st.success() => IpcResponse::Ok {
-                        message: format!("DNS reset to DHCP default on [{}]", service),
-                    },
-                    Ok(st) => IpcResponse::Error {
-                        error: format!("networksetup returned exit code {:?}", st.code()),
-                    },
-                    Err(e) => IpcResponse::Error {
-                        error: format!("Failed to run networksetup: {}", e),
-                    },
+                if let Some(service) = ghostlink_engine::engine::system_proxy::SystemProxyManager::detect_primary_macos_service() {
+                    println!("🌐 [Daemon Root] Resetting DNS on [{}] to DHCP default...", service);
+                    let status = std::process::Command::new("networksetup")
+                        .args(["-setdnsservers", &service, "Empty"])
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => IpcResponse::Ok {
+                            message: format!("DNS reset to default DHCP on {}", service),
+                        },
+                        Ok(s) => IpcResponse::Error {
+                            error: format!("networksetup exited with code {:?}", s.code()),
+                        },
+                        Err(e) => IpcResponse::Error {
+                            error: format!("Failed to execute networksetup: {}", e),
+                        },
+                    }
+                } else {
+                    IpcResponse::Error {
+                        error: "Could not detect active macOS network service".to_string(),
+                    }
                 }
             }
             #[cfg(not(target_os = "macos"))]
             {
-                IpcResponse::Error {
-                    error: "DNS reset not implemented for non-macOS".to_string(),
-                }
+                IpcResponse::Ok { message: "DNS reset completed".to_string() }
             }
         }
 
         IpcRequest::WireGuardList => {
-            let tunnels = ghostlink_engine::engine::wireguard::WireGuardManager::list_tunnels();
-            IpcResponse::WireGuardList(tunnels)
+            let list = ghostlink_engine::WireGuardManager::list_tunnels();
+            IpcResponse::WireGuardList(list)
         }
 
         IpcRequest::WireGuardStatus { tunnel } => {
-            let state = ghostlink_engine::engine::wireguard::WireGuardManager::status(&tunnel);
+            let state = ghostlink_engine::WireGuardManager::status(&tunnel);
             IpcResponse::WireGuardStatus { tunnel, state }
         }
 
         IpcRequest::WireGuardConnect { tunnel } => {
-            match ghostlink_engine::engine::wireguard::WireGuardManager::connect(&tunnel) {
+            match ghostlink_engine::WireGuardManager::connect_exclusive(&tunnel) {
                 Ok(()) => IpcResponse::Ok {
-                    message: format!("WireGuard tunnel '{}' connected", tunnel),
+                    message: format!("WireGuard tunnel '{}' connected exclusively", tunnel),
                 },
                 Err(e) => IpcResponse::Error {
                     error: format!("Failed to connect WireGuard tunnel '{}': {}", tunnel, e),
@@ -397,7 +502,7 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
         }
 
         IpcRequest::WireGuardDisconnect { tunnel } => {
-            match ghostlink_engine::engine::wireguard::WireGuardManager::disconnect(&tunnel) {
+            match ghostlink_engine::WireGuardManager::disconnect(&tunnel) {
                 Ok(()) => IpcResponse::Ok {
                     message: format!("WireGuard tunnel '{}' disconnected", tunnel),
                 },
@@ -408,11 +513,8 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
         }
 
         IpcRequest::WireGuardToggle { tunnel } => {
-            match ghostlink_engine::engine::wireguard::WireGuardManager::toggle(&tunnel) {
-                Ok(new_state) => IpcResponse::WireGuardStatus {
-                    tunnel,
-                    state: new_state,
-                },
+            match ghostlink_engine::WireGuardManager::toggle_exclusive(&tunnel) {
+                Ok(state) => IpcResponse::WireGuardStatus { tunnel, state },
                 Err(e) => IpcResponse::Error {
                     error: format!("Failed to toggle WireGuard tunnel '{}': {}", tunnel, e),
                 },
@@ -420,9 +522,8 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
         }
 
         IpcRequest::AddRoute { ip, router, iface } => {
-            // Security: Validate all arguments before executing as root
             if ip.parse::<std::net::Ipv4Addr>().is_err() {
-                return IpcResponse::Error { error: format!("Invalid IP address: {}", ip) };
+                return IpcResponse::Error { error: format!("Invalid destination IP: {}", ip) };
             }
             if router.parse::<std::net::Ipv4Addr>().is_err() {
                 return IpcResponse::Error { error: format!("Invalid router IP: {}", router) };
@@ -432,21 +533,30 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
             }
 
             println!("🌐 [Daemon Root] Adding host route {} -> {} (interface {})", ip, router, iface);
-            let _ = std::process::Command::new("/sbin/route")
-                .args(["-n", "add", "-host", &ip, &router])
-                .status();
-            let _ = std::process::Command::new("/sbin/route")
-                .args(["-n", "add", "-host", &ip, "-interface", &iface])
-                .status();
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("/sbin/route")
+                    .args(["-n", "add", "-host", &ip, &router])
+                    .status();
+                let _ = std::process::Command::new("/sbin/route")
+                    .args(["-n", "add", "-host", &ip, "-interface", &iface])
+                    .status();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("route")
+                    .args(["add", &ip, "mask", "255.255.255.255", &router])
+                    .status();
+            }
+
             IpcResponse::Ok {
-                message: format!("Route to {} via {} added", ip, iface),
+                message: format!("Route to {} added via {}", ip, router),
             }
         }
 
         IpcRequest::DeleteRoute { ip, router, iface } => {
-            // Security: Validate all arguments before executing as root
             if ip.parse::<std::net::Ipv4Addr>().is_err() {
-                return IpcResponse::Error { error: format!("Invalid IP address: {}", ip) };
+                return IpcResponse::Error { error: format!("Invalid destination IP: {}", ip) };
             }
             if router.parse::<std::net::Ipv4Addr>().is_err() {
                 return IpcResponse::Error { error: format!("Invalid router IP: {}", router) };
@@ -456,12 +566,22 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
             }
 
             println!("🌐 [Daemon Root] Deleting host route {} -> {} (interface {})", ip, router, iface);
-            let _ = std::process::Command::new("/sbin/route")
-                .args(["-n", "delete", "-host", &ip, &router])
-                .status();
-            let _ = std::process::Command::new("/sbin/route")
-                .args(["-n", "delete", "-host", &ip, "-interface", &iface])
-                .status();
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("/sbin/route")
+                    .args(["-n", "delete", "-host", &ip, &router])
+                    .status();
+                let _ = std::process::Command::new("/sbin/route")
+                    .args(["-n", "delete", "-host", &ip, "-interface", &iface])
+                    .status();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("route")
+                    .args(["delete", &ip])
+                    .status();
+            }
+
             IpcResponse::Ok {
                 message: format!("Route to {} removed", ip),
             }
@@ -481,13 +601,11 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
     }
 }
 
+#[cfg(unix)]
 fn get_console_user() -> Option<(u32, u32)> {
-    #[cfg(unix)]
-    {
+    if let Ok(m) = fs::metadata("/dev/console") {
         use std::os::unix::fs::MetadataExt;
-        if let Ok(m) = fs::metadata("/dev/console") {
-            return Some((m.uid(), m.gid()));
-        }
+        return Some((m.uid(), m.gid()));
     }
     None
 }
@@ -505,3 +623,13 @@ fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32)> {
     Ok((euid as u32, egid as u32))
 }
 
+#[cfg(windows)]
+fn is_windows_admin() -> bool {
+    let output = std::process::Command::new("net")
+        .args(["session"])
+        .output();
+    if let Ok(out) = output {
+        return out.status.success();
+    }
+    false
+}

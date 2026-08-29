@@ -3,59 +3,71 @@ pub mod binary_manager;
 pub mod ipc;
 pub mod notifications;
 pub mod payloads;
-pub mod process;
 pub mod probes;
-pub mod service;
+pub mod process;
 pub mod smart_router;
 pub mod strategies;
 pub mod system_proxy;
 pub mod types;
 pub mod wireguard;
+pub mod service;
 
 use anyhow::{anyhow, Result};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-pub use autostart::AutoStartManager;
-pub use ipc::{DaemonClient, DaemonStatusInfo, IpcRequest, IpcResponse};
+pub use binary_manager::BinaryManager;
+pub use ipc::{DaemonClient, IpcRequest, IpcResponse};
 pub use notifications::notify;
-pub use service::ServiceManager;
-pub use smart_router::{SmartRouteEntry, SmartRouter};
+pub use payloads::PayloadManager;
+pub use probes::ProbeRunner;
+pub use process::ProcessHandle;
+pub use smart_router::SmartRouter;
+pub use strategies::StrategyManager;
+pub use system_proxy::SystemProxyManager;
 pub use types::{EngineConfig, EngineState, Platform, ProbeResult, ProbeSummary, Strategy};
-pub use wireguard::{WireGuardManager, WireGuardState, WireGuardTunnelInfo};
-use binary_manager::BinaryManager;
-use process::ProcessHandle;
-use probes::ProbeRunner;
-use strategies::StrategyManager;
-use system_proxy::SystemProxyManager;
+pub use wireguard::{WireGuardManager, WireGuardState};
+pub use autostart::AutoStartManager;
+pub use service::ServiceManager;
 
 pub struct UnblockEngine {
     config: EngineConfig,
+    state: EngineState,
     binary_mgr: BinaryManager,
     strategy_mgr: StrategyManager,
+    payload_mgr: PayloadManager,
     proxy_mgr: SystemProxyManager,
     probe_runner: ProbeRunner,
     active_process: Option<ProcessHandle>,
-    state: EngineState,
-    watchdog_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    watchdog_running: Arc<AtomicBool>,
 }
 
 impl UnblockEngine {
     pub fn new(config: EngineConfig) -> Self {
-        let binary_mgr = BinaryManager::new(&config.base_dir);
-        let strategy_mgr = StrategyManager::new(&config.base_dir);
+        let base_dir = config
+            .base_dir
+            .clone()
+            .unwrap_or_else(|| dirs_fallback());
+
+        let binary_mgr = BinaryManager::new(&base_dir);
+        let strategy_mgr = StrategyManager::new(&base_dir);
+        let payload_mgr = PayloadManager::new(&base_dir);
         let proxy_mgr = SystemProxyManager::new(config.socks_port);
         let probe_runner = ProbeRunner::new();
 
         Self {
             config,
+            state: EngineState::Stopped,
             binary_mgr,
             strategy_mgr,
+            payload_mgr,
             proxy_mgr,
             probe_runner,
             active_process: None,
-            state: EngineState::Stopped,
-            watchdog_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            watchdog_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -67,43 +79,31 @@ impl UnblockEngine {
         matches!(self.state, EngineState::Running { .. })
     }
 
-    pub fn config(&self) -> &EngineConfig {
-        &self.config
+    pub fn list_strategies(&self) -> Vec<Strategy> {
+        let bin_dir = self.binary_mgr.bin_dir();
+        self.strategy_mgr.list_strategies(bin_dir, self.config.socks_port)
     }
 
-    /// Prepare environment: downloads/verifies binary, generates payloads and domain lists.
+    /// Prepares binaries, fake payloads and hostlists.
     pub async fn prepare(&self) -> Result<()> {
-        // 1. Ensure domain lists
-        self.strategy_mgr.ensure_lists()?;
-
-        // 2. Ensure payload .bin files in binary directory
-        payloads::ensure_payload_files(self.binary_mgr.bin_dir())?;
-
-        // 3. Ensure executables exist and have proper permissions
         self.binary_mgr.ensure_binaries().await?;
-
+        self.payload_mgr.ensure_payloads()?;
+        self.strategy_mgr.ensure_lists().await?;
         Ok(())
     }
 
-    /// Returns all available strategies for current operating system.
-    pub fn list_strategies(&self) -> Vec<Strategy> {
-        let platform = Platform::current();
-        self.strategy_mgr.get_strategies_for_platform(platform, self.binary_mgr.bin_dir(), self.config.socks_port)
-    }
-
-    /// Starts the engine with the chosen strategy.
+    /// Starts the engine with a specific strategy.
     pub async fn start(&mut self, strategy: &Strategy) -> Result<()> {
-        self.stop().await?;
+        if self.is_running() {
+            self.stop().await?;
+        }
+
         self.prepare().await?;
 
         let exe_path = self.binary_mgr.get_executable_path();
         if !exe_path.exists() {
             return Err(anyhow!("Binary executable not found: {:?}", exe_path));
         }
-
-        // Note: Previous process cleanup is handled by self.stop() above (line 96),
-        // which uses ProcessHandle::kill() to terminate the specific child process.
-        // We intentionally do NOT use pkill -f here as it would kill unrelated processes.
 
         println!("🚀 Launching engine with strategy: [{}]", strategy.name);
         let proc = ProcessHandle::spawn(&exe_path, &strategy.args)?;
@@ -112,30 +112,44 @@ impl UnblockEngine {
         // Give the process a brief moment to initialize its socket/driver
         sleep(Duration::from_millis(600)).await;
 
-        // 1. Strict Pre-Proxy Port Verification: Verify that the process is actually listening on 127.0.0.1:port
-        let mut port_listening = false;
-        for _ in 0..30 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", self.config.socks_port)).await.is_ok() {
-                port_listening = true;
-                break;
+        #[cfg(target_os = "macos")]
+        {
+            // 1. Strict Pre-Proxy Port Verification (macOS tpws SOCKS proxy)
+            let mut port_listening = false;
+            for _ in 0..30 {
+                if tokio::net::TcpStream::connect(("127.0.0.1", self.config.socks_port)).await.is_ok() {
+                    port_listening = true;
+                    break;
+                }
+                sleep(Duration::from_millis(60)).await;
             }
-            sleep(Duration::from_millis(60)).await;
-        }
 
-        if !port_listening {
-            eprintln!("❌ CRITICAL ERROR: Engine process spawned but port {} is NOT accepting TCP connections! Refusing to enable system proxy.", self.config.socks_port);
-            let _ = self.stop().await;
-            return Err(anyhow!("tpws failed to bind and listen on 127.0.0.1:{}", self.config.socks_port));
-        }
-
-        println!("✅ Port {} verified actively listening and accepting traffic.", self.config.socks_port);
-
-        // 2. On macOS, configure system SOCKS proxy only AFTER port is 100% verified
-        if cfg!(target_os = "macos") && self.config.apply_system_proxy {
-            if let Err(e) = self.proxy_mgr.enable_macos_proxy() {
+            if !port_listening {
+                eprintln!("❌ CRITICAL ERROR: Engine process spawned but port {} is NOT accepting TCP connections! Refusing to enable system proxy.", self.config.socks_port);
                 let _ = self.stop().await;
-                return Err(e);
+                return Err(anyhow!("tpws failed to bind and listen on 127.0.0.1:{}", self.config.socks_port));
             }
+
+            println!("✅ Port {} verified actively listening and accepting traffic.", self.config.socks_port);
+
+            // 2. On macOS, configure system SOCKS proxy only AFTER port is 100% verified
+            if self.config.apply_system_proxy {
+                if let Err(e) = self.proxy_mgr.enable_macos_proxy() {
+                    let _ = self.stop().await;
+                    return Err(e);
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(ref p) = self.active_process {
+                if !p.is_alive() {
+                    let _ = self.stop().await;
+                    return Err(anyhow!("winws.exe process failed to launch or crashed on startup"));
+                }
+            }
+            println!("✅ WinDivert kernel packet filter active & transparently desyncing L3/L4 TCP & UDP traffic.");
         }
 
         self.state = EngineState::Running {
@@ -155,22 +169,22 @@ impl UnblockEngine {
                     break;
                 }
 
-                // Actively probe localhost port with timeout
-                let check = tokio::time::timeout(
-                    Duration::from_millis(350),
-                    tokio::net::TcpStream::connect(("127.0.0.1", socks_port)),
-                ).await;
+                #[cfg(target_os = "macos")]
+                {
+                    // Actively probe localhost port with timeout
+                    let check = tokio::time::timeout(
+                        Duration::from_millis(350),
+                        tokio::net::TcpStream::connect(("127.0.0.1", socks_port)),
+                    ).await;
 
-                let port_ok = match check {
-                    Ok(Ok(_)) => true,
-                    _ => false,
-                };
+                    let port_ok = match check {
+                        Ok(Ok(_)) => true,
+                        _ => false,
+                    };
 
-                if !port_ok {
-                    if watchdog_flag.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                        eprintln!("\n🚨 EMERGENCY WATCHDOG TRIGGERED: GhostLink engine dropped! Restoring system network settings instantly...");
-                        #[cfg(target_os = "macos")]
-                        {
+                    if !port_ok {
+                        if watchdog_flag.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            eprintln!("\n🚨 EMERGENCY WATCHDOG TRIGGERED: GhostLink engine dropped! Restoring system network settings instantly...");
                             if let Some(service) = SystemProxyManager::detect_primary_macos_service() {
                                 let _ = std::process::Command::new("networksetup")
                                     .args(["-setsocksfirewallproxystate", &service, "off"])
@@ -183,10 +197,16 @@ impl UnblockEngine {
                                 "GhostLink Emergency Recovery",
                                 "GhostLink recovered from an error automatically (network restored)",
                             );
+                            eprintln!("✨ System network settings restored to normal.\n");
+                            break;
                         }
-                        eprintln!("✨ System network settings restored to normal.\n");
-                        break;
                     }
+                }
+
+                #[cfg(not(target_os = "macos"))]
+                {
+                    // On Windows, WinDivert driver unloads automatically on process exit
+                    let _ = socks_port;
                 }
             }
         });
@@ -237,7 +257,7 @@ impl UnblockEngine {
             });
         }
 
-        // On macOS, we probe through the local SOCKS proxy
+        // On macOS, we probe through the local SOCKS proxy; on Windows WinDivert intercepts transparently
         let proxy_url = if cfg!(target_os = "macos") {
             Some(format!("socks5h://127.0.0.1:{}", self.config.socks_port))
         } else {
@@ -252,31 +272,45 @@ impl UnblockEngine {
         Ok(summary)
     }
 
-    /// Auto-tune: Iterates through all available strategies to find the best working one.
-    pub async fn auto_tune<F>(&mut self, mut progress_callback: F) -> Result<Option<Strategy>>
+    /// Automatically benchmarks all strategies for current OS and returns the best one.
+    pub async fn auto_tune<F>(&mut self, mut progress_cb: F) -> Result<Option<Strategy>>
     where
         F: FnMut(usize, usize, &Strategy, Option<&ProbeSummary>),
     {
         let strategies = self.list_strategies();
         let total = strategies.len();
+        let mut best: Option<(Strategy, ProbeSummary)> = None;
 
-        for (index, strategy) in strategies.iter().enumerate() {
-            progress_callback(index + 1, total, strategy, None);
+        for (idx, strat) in strategies.iter().enumerate() {
+            progress_cb(idx + 1, total, strat, None);
 
-            match self.test_strategy(strategy).await {
+            match self.test_strategy(strat).await {
                 Ok(summary) => {
-                    progress_callback(index + 1, total, strategy, Some(&summary));
+                    progress_cb(idx + 1, total, strat, Some(&summary));
+
                     if summary.success {
-                        println!("🎉 Working strategy found: [{}] (Total probe latency: {}ms)", strategy.name, summary.total_latency_ms);
-                        return Ok(Some(strategy.clone()));
+                        let is_better = match &best {
+                            None => true,
+                            Some((_, prev_best)) => summary.total_latency_ms < prev_best.total_latency_ms,
+                        };
+                        if is_better {
+                            best = Some((strat.clone(), summary));
+                        }
                     }
                 }
-                Err(err) => {
-                    println!("⚠️ Strategy [{}] failed with error: {}", strategy.name, err);
+                Err(_) => {
+                    progress_cb(idx + 1, total, strat, None);
                 }
             }
         }
 
-        Ok(None)
+        Ok(best.map(|(s, _)| s))
     }
+}
+
+fn dirs_fallback() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".ghostlink")
 }

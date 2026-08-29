@@ -146,6 +146,10 @@ impl StrategyManager {
         }
     }
 
+    pub fn list_strategies(&self, bin_dir: &Path, socks_port: u16) -> Vec<Strategy> {
+        self.get_strategies_for_platform(Platform::current(), bin_dir, socks_port)
+    }
+
     fn get_macos_strategies(&self, socks_port: u16) -> Vec<Strategy> {
         let general_list = self.lists_dir.join("list-general.txt").to_string_lossy().to_string();
 
@@ -254,7 +258,7 @@ impl StrategyManager {
                 format!("--dpi-desync-fake-quic={}", quic_g),
                 "--new".to_string(),
             ]);
-            // Rule 2: UDP Discord Voice
+            // Rule 2: UDP Discord Voice (STUN & WebRTC)
             args.extend([
                 "--filter-udp=19294-19344,50000-50100".to_string(),
                 "--filter-l7=discord,stun".to_string(),
@@ -334,7 +338,7 @@ impl StrategyManager {
             Strategy {
                 id: "win-alt9".to_string(),
                 name: "Windows ALT9 (Recommended First)".to_string(),
-                description: "Multi-split with sequence overlap 681 and fake TLS pattern.".to_string(),
+                description: "Multi-split with sequence overlap 681 and fake TLS pattern. Best compatibility for Turkish and global ISPs.".to_string(),
                 platform: Platform::Windows,
                 args: build_8rule(
                     "fake,multisplit",
@@ -348,7 +352,7 @@ impl StrategyManager {
             Strategy {
                 id: "win-alt11".to_string(),
                 name: "Windows ALT11".to_string(),
-                description: "High-repeat fake multisplit with TS fooling.".to_string(),
+                description: "High-repeat fake multisplit with TS fooling and pattern sequence overlap.".to_string(),
                 platform: Platform::Windows,
                 args: build_8rule(
                     "fake,multisplit",
@@ -371,6 +375,48 @@ impl StrategyManager {
                     vec!["--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
                     vec!["--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
                     12,
+                ),
+            },
+            Strategy {
+                id: "win-alt3".to_string(),
+                name: "Windows ALT3 (Fake + Hostfakesplit)".to_string(),
+                description: "Fake TLS ClientHello + hostfakesplit with badsum fooling for aggressive DPI boxes.".to_string(),
+                platform: Platform::Windows,
+                args: build_8rule(
+                    "fake,hostfakesplit",
+                    vec!["--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts,badsum".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts,badsum".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts,badsum".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
+                    vec!["--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts,badsum".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
+                    10,
+                ),
+            },
+            Strategy {
+                id: "win-alt10".to_string(),
+                name: "Windows ALT10 (Pure Multisplit)".to_string(),
+                description: "Pure multi-split at SNI and SLD boundaries without fake payloads.".to_string(),
+                platform: Platform::Windows,
+                args: build_8rule(
+                    "multisplit",
+                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,midsld".into()],
+                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,midsld".into()],
+                    vec!["--dpi-desync-split-seqovl=664".into(), "--dpi-desync-split-pos=1,midsld".into()],
+                    vec!["--dpi-desync-split-seqovl=664".into(), "--dpi-desync-split-pos=1,midsld".into()],
+                    8,
+                ),
+            },
+            Strategy {
+                id: "win-simple-fake".to_string(),
+                name: "Windows Simple Fake (Fast Low-Overhead)".to_string(),
+                description: "Low-overhead fake packet injection with TCP timestamp fooling.".to_string(),
+                platform: Platform::Windows,
+                args: build_8rule(
+                    "fake",
+                    vec!["--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
+                    vec!["--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
+                    6,
                 ),
             },
         ]

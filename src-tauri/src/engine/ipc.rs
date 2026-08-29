@@ -2,12 +2,12 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 use crate::engine::types::{ProbeSummary, Strategy};
 
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/ghostlink.sock";
 pub const FALLBACK_SOCKET_PATH: &str = "/tmp/ghostlink.sock";
+pub const WINDOWS_IPC_ADDR: &str = "127.0.0.1:49281";
 
 /// Returns the primary active socket path or fallback.
 pub fn get_socket_path() -> PathBuf {
@@ -111,6 +111,7 @@ pub struct DaemonStatusInfo {
 
 /// IPC client to interact with running ghostlink_daemon.
 pub struct DaemonClient {
+    #[allow(dead_code)]
     socket_path: PathBuf,
 }
 
@@ -137,11 +138,22 @@ impl DaemonClient {
     }
 
     pub async fn send_request(&self, request: &IpcRequest) -> Result<IpcResponse> {
-        let stream = UnixStream::connect(&self.socket_path)
-            .await
-            .with_context(|| format!("Failed to connect to daemon socket at {:?}", self.socket_path))?;
+        #[cfg(unix)]
+        let (reader, mut writer) = {
+            let stream = tokio::net::UnixStream::connect(&self.socket_path)
+                .await
+                .with_context(|| format!("Failed to connect to daemon socket at {:?}", self.socket_path))?;
+            stream.into_split()
+        };
 
-        let (reader, mut writer) = stream.into_split();
+        #[cfg(windows)]
+        let (reader, mut writer) = {
+            let stream = tokio::net::TcpStream::connect(WINDOWS_IPC_ADDR)
+                .await
+                .with_context(|| format!("Failed to connect to GhostLink Windows service on {}", WINDOWS_IPC_ADDR))?;
+            stream.into_split()
+        };
+
         let mut reader = BufReader::new(reader);
 
         let mut req_str = serde_json::to_string(request)?;
