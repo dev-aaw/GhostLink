@@ -3,36 +3,23 @@ use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const HOST_LIST_GOOGLE: &str = r#"googlevideo.com
-youtube.com
-youtubekids.com
-ytimg.com
-youtu.be
-youtubei.googleapis.com
-yt4.ggpht.com
-yt3.ggpht.com
-yt2.ggpht.com
-yt1.ggpht.com
-gvt1.com
-video.google.com
-play.google.com
-wide-youtube.l.google.com
-redirector.googlevideo.com
-jnn-pa.googleapis.com"#;
+pub struct StrategyManager {
+    lists_dir: PathBuf,
+}
 
-pub const HOST_LIST_DISCORD: &str = r#"discord.com
-discord.gg
-discordapp.com
-discordapp.net
-discord.media
-discordcdn.com
-gateway.discord.gg
-cdn.discordapp.com
-media.discordapp.net
-status.discord.com
-latency.discord.media"#;
+impl StrategyManager {
+    pub fn new(base_dir: &Path) -> Self {
+        Self {
+            lists_dir: base_dir.join("lists"),
+        }
+    }
 
-pub const HOST_LIST_GENERAL: &str = r#"googlevideo.com
+    pub fn ensure_lists(&self) -> Result<()> {
+        fs::create_dir_all(&self.lists_dir)?;
+
+        let general_list = self.lists_dir.join("list-general.txt");
+        if !general_list.exists() {
+            let content = r#"googlevideo.com
 youtube.com
 youtubekids.com
 ytimg.com
@@ -67,165 +54,230 @@ x.com
 t.co
 twimg.com
 wikileaks.org
-www.wikileaks.org"#;
+www.wikileaks.org
+"#;
+            fs::write(general_list, content)?;
+        }
 
-pub const HOST_LIST_EXCLUDE: &str = r#"yandex.ru
-ya.ru
-vk.com
-mail.ru
-gosuslugi.ru
-ozon.ru
-wildberries.ru
-sberbank.ru
-tinkoff.ru
-t-bank.ru
-avito.ru
-rutube.ru
-kinopoisk.ru
-127.0.0.1
-localhost"#;
+        let google_list = self.lists_dir.join("list-google.txt");
+        if !google_list.exists() {
+            let content = r#"googlevideo.com
+youtube.com
+youtubekids.com
+ytimg.com
+youtu.be
+youtubei.googleapis.com
+yt4.ggpht.com
+yt3.ggpht.com
+yt2.ggpht.com
+yt1.ggpht.com
+gvt1.com
+video.google.com
+play.google.com
+wide-youtube.l.google.com
+redirector.googlevideo.com
+jnn-pa.googleapis.com
+"#;
+            fs::write(google_list, content)?;
+        }
 
-pub const IPSET_ALL: &str = r#"162.158.0.0/15
-104.16.0.0/13
-104.24.0.0/14
-172.64.0.0/13
-188.114.96.0/20
-197.234.240.0/22
-198.41.128.0/17
-66.22.192.0/18
-173.245.48.0/20
-103.21.244.0/22
-103.22.200.0/22
-103.31.4.0/22
-141.101.64.0/18
-190.93.240.0/20"#;
+        let discord_list = self.lists_dir.join("list-discord.txt");
+        if !discord_list.exists() {
+            let content = r#"discord.com
+discord.gg
+discordapp.com
+discordapp.net
+discord.media
+discordcdn.com
+gateway.discord.gg
+cdn.discordapp.com
+media.discordapp.net
+status.discord.com
+latency.discord.media
+"#;
+            fs::write(discord_list, content)?;
+        }
 
-pub const IPSET_EXCLUDE: &str = r#"10.0.0.0/8
-127.0.0.0/8
-169.254.0.0/16
+        let exclude_list = self.lists_dir.join("list-exclude.txt");
+        if !exclude_list.exists() {
+            let content = r#"127.0.0.1
+localhost
+::1
+router.asus.com
+tplinkwifi.net
+my.router
+speedtest.net
+fast.com
+turktelekom.com.tr
+turkcell.com.tr
+vodafone.com.tr
+"#;
+            fs::write(exclude_list, content)?;
+        }
+
+        let ipset_all = self.lists_dir.join("ipset-all.txt");
+        if !ipset_all.exists() {
+            let content = r#"1.1.1.1
+1.0.0.1
+8.8.8.8
+8.8.4.4
+9.9.9.9
+149.112.112.112
+"#;
+            fs::write(ipset_all, content)?;
+        }
+
+        let ipset_exclude = self.lists_dir.join("ipset-exclude.txt");
+        if !ipset_exclude.exists() {
+            let content = r#"10.0.0.0/8
 172.16.0.0/12
 192.168.0.0/16
-fc00::/7
-fe80::/10
-::1/128"#;
-
-pub struct StrategyManager {
-    lists_dir: PathBuf,
-}
-
-impl StrategyManager {
-    pub fn new(base_dir: &Path) -> Self {
-        Self {
-            lists_dir: base_dir.join("lists"),
+127.0.0.0/8
+"#;
+            fs::write(ipset_exclude, content)?;
         }
-    }
-
-    pub fn lists_dir(&self) -> &Path {
-        &self.lists_dir
-    }
-
-    pub fn ensure_lists(&self) -> Result<()> {
-        fs::create_dir_all(&self.lists_dir)?;
-
-        fs::write(self.lists_dir.join("list-google.txt"), HOST_LIST_GOOGLE)?;
-        fs::write(self.lists_dir.join("list-discord.txt"), HOST_LIST_DISCORD)?;
-        fs::write(self.lists_dir.join("list-general.txt"), HOST_LIST_GENERAL)?;
-        fs::write(self.lists_dir.join("list-exclude.txt"), HOST_LIST_EXCLUDE)?;
-        fs::write(self.lists_dir.join("ipset-all.txt"), IPSET_ALL)?;
-        fs::write(self.lists_dir.join("ipset-exclude.txt"), IPSET_EXCLUDE)?;
 
         Ok(())
     }
 
-    /// Returns the full list of strategies for the current platform in recommended testing order.
-    pub fn get_strategies_for_platform(&self, platform: Platform, bin_dir: &Path, socks_port: u16) -> Vec<Strategy> {
-        match platform {
-            Platform::MacOS => self.get_macos_strategies(socks_port),
-            Platform::Windows => self.get_windows_strategies(bin_dir),
-            Platform::Linux => self.get_macos_strategies(socks_port),
+    pub fn list_strategies(&self, bin_dir: &Path, socks_port: u16) -> Vec<Strategy> {
+        #[cfg(target_os = "macos")]
+        {
+            self.get_macos_strategies(bin_dir, socks_port)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = socks_port;
+            self.get_windows_strategies(bin_dir)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = socks_port;
+            let _ = bin_dir;
+            Vec::new()
         }
     }
 
-    pub fn list_strategies(&self, bin_dir: &Path, socks_port: u16) -> Vec<Strategy> {
-        self.get_strategies_for_platform(Platform::current(), bin_dir, socks_port)
-    }
+    #[cfg(target_os = "macos")]
+    fn get_macos_strategies(&self, bin_dir: &Path, socks_port: u16) -> Vec<Strategy> {
+        let q = |f: &str| bin_dir.join(f).to_string_lossy().to_string();
+        let l = |f: &str| self.lists_dir.join(f).to_string_lossy().to_string();
 
-    fn get_macos_strategies(&self, socks_port: u16) -> Vec<Strategy> {
-        let general_list = self.lists_dir.join("list-general.txt").to_string_lossy().to_string();
+        let tls_g = q("tls_clienthello_www_google_com.bin");
+        let tls_4 = q("tls_clienthello_4pda_to.bin");
+        let tls_m = q("tls_clienthello_max_ru.bin");
+
+        let base_socks = format!("--socks=127.0.0.1:{}", socks_port);
 
         vec![
             Strategy {
-                id: "mac-split-midsld".to_string(),
-                name: "macOS TLS Split + Mid-SLD (Default)".to_string(),
-                description: "Splits TLS ClientHello at domain middle with disordering. Very effective on macOS.".to_string(),
+                id: "mac-alt9".to_string(),
+                name: "macOS ALT9 (Recommended)".to_string(),
+                description: "Dual-tier TLS multi-split (Google/Discord 681B + General 664B) with TS fooling. Highest success rate for Turkish ISPs.".to_string(),
                 platform: Platform::MacOS,
                 args: vec![
-                    format!("--port={}", socks_port),
-                    "--bind-addr=127.0.0.1".to_string(),
-                    "--maxconn=512".to_string(),
-                    "--socks".to_string(),
-                    "--split-pos=1,midsld".to_string(),
-                    "--disorder".to_string(),
-                    format!("--hostlist={}", general_list),
-                ],
-            },
-            Strategy {
-                id: "mac-split-tls-sni".to_string(),
-                name: "macOS TLS SNI Split".to_string(),
-                description: "Splits TLS ClientHello right at the SNI extension boundary.".to_string(),
-                platform: Platform::MacOS,
-                args: vec![
-                    format!("--port={}", socks_port),
-                    "--bind-addr=127.0.0.1".to_string(),
-                    "--maxconn=512".to_string(),
-                    "--socks".to_string(),
-                    "--split-tls=sni".to_string(),
-                    "--disorder".to_string(),
-                    format!("--hostlist={}", general_list),
-                ],
-            },
-            Strategy {
-                id: "mac-split-pos-1".to_string(),
-                name: "macOS Split Pos 1".to_string(),
-                description: "Splits packet at 1st byte + disordering.".to_string(),
-                platform: Platform::MacOS,
-                args: vec![
-                    format!("--port={}", socks_port),
-                    "--bind-addr=127.0.0.1".to_string(),
-                    "--maxconn=512".to_string(),
-                    "--socks".to_string(),
+                    base_socks.clone(),
+                    "--port=443".to_string(),
+                    format!("--hostlist={}", l("list-google.txt")),
                     "--split-pos=1".to_string(),
-                    "--disorder".to_string(),
-                    format!("--hostlist={}", general_list),
+                    "--split-seqovl=681".to_string(),
+                    format!("--split-seqovl-pattern={}", tls_g),
+                    "--fooling=ts".to_string(),
+                    "--new".to_string(),
+                    "--port=443".to_string(),
+                    format!("--hostlist={}", l("list-general.txt")),
+                    format!("--hostlist-exclude={}", l("list-exclude.txt")),
+                    "--split-pos=1".to_string(),
+                    "--split-seqovl=664".to_string(),
+                    format!("--split-seqovl-pattern={}", tls_m),
+                    "--fooling=ts".to_string(),
                 ],
             },
             Strategy {
-                id: "mac-oob".to_string(),
-                name: "macOS Out-Of-Band (OOB)".to_string(),
-                description: "Injects out-of-band byte marker to desynchronize DPI state machine.".to_string(),
+                id: "mac-alt11".to_string(),
+                name: "macOS ALT11".to_string(),
+                description: "Multi-split TLS desync with TS fooling and 4pda pattern. Excellent fallback for YouTube and streaming.".to_string(),
                 platform: Platform::MacOS,
                 args: vec![
-                    format!("--port={}", socks_port),
-                    "--bind-addr=127.0.0.1".to_string(),
-                    "--maxconn=512".to_string(),
-                    "--socks".to_string(),
-                    "--oob".to_string(),
-                    format!("--hostlist={}", general_list),
+                    base_socks.clone(),
+                    "--port=443".to_string(),
+                    format!("--hostlist={}", l("list-google.txt")),
+                    "--split-pos=1".to_string(),
+                    "--split-seqovl=681".to_string(),
+                    format!("--split-seqovl-pattern={}", tls_g),
+                    "--fooling=ts".to_string(),
+                    "--new".to_string(),
+                    "--port=443".to_string(),
+                    format!("--hostlist={}", l("list-general.txt")),
+                    format!("--hostlist-exclude={}", l("list-exclude.txt")),
+                    "--split-pos=1".to_string(),
+                    "--split-seqovl=568".to_string(),
+                    format!("--split-seqovl-pattern={}", tls_4),
+                    "--fooling=ts".to_string(),
                 ],
             },
             Strategy {
-                id: "mac-combo-tls-http".to_string(),
-                name: "macOS Combo TLS+HTTP Split".to_string(),
-                description: "Splits HTTP request method and TLS SNI concurrently.".to_string(),
+                id: "mac-general".to_string(),
+                name: "macOS General".to_string(),
+                description: "Standard multi-split TLS desync with 4pda pattern without TS fooling. Broad compatibility.".to_string(),
                 platform: Platform::MacOS,
                 args: vec![
-                    format!("--port={}", socks_port),
-                    "--bind-addr=127.0.0.1".to_string(),
-                    "--maxconn=512".to_string(),
-                    "--socks".to_string(),
-                    "--split-http-req=method".to_string(),
-                    "--split-tls=sni".to_string(),
-                    format!("--hostlist={}", general_list),
+                    base_socks.clone(),
+                    "--port=443".to_string(),
+                    format!("--hostlist={}", l("list-google.txt")),
+                    "--split-pos=1".to_string(),
+                    "--split-seqovl=681".to_string(),
+                    format!("--split-seqovl-pattern={}", tls_g),
+                    "--new".to_string(),
+                    "--port=443".to_string(),
+                    format!("--hostlist={}", l("list-general.txt")),
+                    format!("--hostlist-exclude={}", l("list-exclude.txt")),
+                    "--split-pos=1".to_string(),
+                    "--split-seqovl=568".to_string(),
+                    format!("--split-seqovl-pattern={}", tls_4),
+                ],
+            },
+            Strategy {
+                id: "mac-alt3".to_string(),
+                name: "macOS ALT3 (SNI-Split)".to_string(),
+                description: "SNI-based desynchronization splitting at SNI extension boundary with badsum fooling.".to_string(),
+                platform: Platform::MacOS,
+                args: vec![
+                    base_socks.clone(),
+                    "--port=443".to_string(),
+                    format!("--hostlist={}", l("list-general.txt")),
+                    format!("--hostlist-exclude={}", l("list-exclude.txt")),
+                    "--split-pos=sniext+1".to_string(),
+                    "--split-seqovl=681".to_string(),
+                    format!("--split-seqovl-pattern={}", tls_g),
+                    "--fooling=badsum".to_string(),
+                ],
+            },
+            Strategy {
+                id: "mac-alt10".to_string(),
+                name: "macOS ALT10 (SLD-Split)".to_string(),
+                description: "Pure multi-split desync at second-level domain boundary. Clean bypass with zero fake packets.".to_string(),
+                platform: Platform::MacOS,
+                args: vec![
+                    base_socks.clone(),
+                    "--port=443".to_string(),
+                    format!("--hostlist={}", l("list-general.txt")),
+                    format!("--hostlist-exclude={}", l("list-exclude.txt")),
+                    "--split-pos=midsld".to_string(),
+                ],
+            },
+            Strategy {
+                id: "mac-simple-fake".to_string(),
+                name: "macOS Simple Fake".to_string(),
+                description: "Fast, low-overhead fake packet injection with TCP timestamp fooling.".to_string(),
+                platform: Platform::MacOS,
+                args: vec![
+                    base_socks,
+                    "--port=443".to_string(),
+                    format!("--hostlist={}", l("list-general.txt")),
+                    format!("--hostlist-exclude={}", l("list-exclude.txt")),
+                    "--split-pos=1".to_string(),
+                    "--fooling=ts".to_string(),
                 ],
             },
         ]
@@ -237,15 +289,16 @@ impl StrategyManager {
 
         let tls_g = q("tls_clienthello_www_google_com.bin");
         let tls_4 = q("tls_clienthello_4pda_to.bin");
-        let tls_m = q("tls_clienthello_max_ru.bin");
         let quic_g = q("quic_initial_www_google_com.bin");
+        let quic_d = q("quic_initial_dbankcloud_ru.bin");
 
         let wf_full = vec![
             "--wf-tcp=80,443,2053,2083,2087,2096,8443".to_string(),
             "--wf-udp=443,19294-19344,50000-50100".to_string(),
         ];
 
-        let build_8rule = |method: &str, r3: Vec<String>, r4: Vec<String>, r5: Vec<String>, r7: Vec<String>, game_repeats: usize| -> Vec<String> {
+        // Flowseal standard 8-rule builder matching official release batch files exactly
+        let build_windows_flowseal_rules = |r3: Vec<String>, r4: Vec<String>, r5: Vec<String>, r7: Vec<String>, r8: Vec<String>| -> Vec<String> {
             let mut args = wf_full.clone();
             // Rule 1: UDP 443 QUIC
             args.extend([
@@ -263,6 +316,8 @@ impl StrategyManager {
                 "--filter-udp=19294-19344,50000-50100".to_string(),
                 "--filter-l7=discord,stun".to_string(),
                 "--dpi-desync=fake".to_string(),
+                format!("--dpi-desync-fake-discord={}", quic_d),
+                format!("--dpi-desync-fake-stun={}", quic_d),
                 "--dpi-desync-repeats=6".to_string(),
                 "--new".to_string(),
             ]);
@@ -270,7 +325,6 @@ impl StrategyManager {
             args.extend([
                 "--filter-tcp=2053,2083,2087,2096,8443".to_string(),
                 "--hostlist-domains=discord.media".to_string(),
-                format!("--dpi-desync={}", method),
             ]);
             args.extend(r3);
             args.push("--new".to_string());
@@ -280,18 +334,16 @@ impl StrategyManager {
                 "--filter-tcp=443".to_string(),
                 format!("--hostlist={}", l("list-google.txt")),
                 "--ip-id=zero".to_string(),
-                format!("--dpi-desync={}", method),
             ]);
             args.extend(r4);
             args.push("--new".to_string());
 
-            // Rule 5: General TCP
+            // Rule 5: General TCP (Discord Web, WikiLeaks, X, etc.)
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-general.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
-                format!("--dpi-desync={}", method),
             ]);
             args.extend(r5);
             args.push("--new".to_string());
@@ -310,113 +362,106 @@ impl StrategyManager {
 
             // Rule 7: IP-set TCP Fallback
             args.extend([
-                "--filter-tcp=80,443".to_string(),
+                "--filter-tcp=80,443,8443".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
-                format!("--dpi-desync={}", method),
             ]);
             args.extend(r7);
             args.push("--new".to_string());
 
-            // Rule 8: UDP Game Catch-All
+            // Rule 8: UDP Game / Catch-All
             args.extend([
                 "--filter-udp=12".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
                 "--dpi-desync=fake".to_string(),
-                format!("--dpi-desync-repeats={}", game_repeats),
+                "--dpi-desync-repeats=12".to_string(),
                 "--dpi-desync-any-protocol=1".to_string(),
-                format!("--dpi-desync-fake-unknown-udp={}", quic_g),
-                "--dpi-desync-cutoff=n4".to_string(),
+                format!("--dpi-desync-fake-unknown-udp={}", quic_d),
             ]);
+            args.extend(r8);
 
             args
         };
 
         vec![
             Strategy {
-                id: "win-alt9".to_string(),
-                name: "Windows ALT9 (Recommended First)".to_string(),
-                description: "Multi-split with sequence overlap 681 and fake TLS pattern. Best compatibility for Turkish and global ISPs.".to_string(),
+                id: "win-general".to_string(),
+                name: "Windows General (Flowseal Default - Recommended)".to_string(),
+                description: "Official Flowseal multisplit 681/568 with ClientHello pattern matching. Zero connection resets, fully tested across ISPs.".to_string(),
                 platform: Platform::Windows,
-                args: build_8rule(
-                    "fake,multisplit",
-                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
-                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
-                    vec!["--dpi-desync-split-seqovl=664".into(), "--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
-                    vec!["--dpi-desync-split-seqovl=664".into(), "--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
-                    10,
+                args: build_windows_flowseal_rules(
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync-cutoff=n2".into()],
+                ),
+            },
+            Strategy {
+                id: "win-alt".to_string(),
+                name: "Windows ALT (SNI Ext Split)".to_string(),
+                description: "Multi-split at SNI extension boundary with sequence overlap. Highly effective against deep packet inspection.".to_string(),
+                platform: Platform::Windows,
+                args: build_windows_flowseal_rules(
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=568".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=568".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync-cutoff=n2".into()],
+                ),
+            },
+            Strategy {
+                id: "win-alt9".to_string(),
+                name: "Windows ALT9 (Hostfakesplit)".to_string(),
+                description: "Official Flowseal ALT9 hostfakesplit with google/ozon domain modifiers and timestamp fooling.".to_string(),
+                platform: Platform::Windows,
+                args: build_windows_flowseal_rules(
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com".into()],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com".into()],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync-cutoff=n2".into()],
                 ),
             },
             Strategy {
                 id: "win-alt11".to_string(),
-                name: "Windows ALT11".to_string(),
-                description: "High-repeat fake multisplit with TS fooling and pattern sequence overlap.".to_string(),
+                name: "Windows ALT11 (Pos 2 + SNI Ext)".to_string(),
+                description: "Multi-split at position 2 and SNI extension + 1 with 679 byte pattern overlap.".to_string(),
                 platform: Platform::Windows,
-                args: build_8rule(
-                    "fake,multisplit",
-                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-repeats=8".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), format!("--dpi-desync-fake-tls={}", tls_g)],
-                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-repeats=8".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), format!("--dpi-desync-fake-tls={}", tls_g)],
-                    vec!["--dpi-desync-split-seqovl=664".into(), "--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-repeats=8".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_m), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
-                    vec!["--dpi-desync-split-seqovl=664".into(), "--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-repeats=8".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_m), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
-                    10,
-                ),
-            },
-            Strategy {
-                id: "win-general".to_string(),
-                name: "Windows general (Flowseal Default)".to_string(),
-                description: "Standard Flowseal multisplit 681/568 with pattern matching.".to_string(),
-                platform: Platform::Windows,
-                args: build_8rule(
-                    "multisplit",
-                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
-                    vec!["--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
-                    12,
+                args: build_windows_flowseal_rules(
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=syndata".into()],
+                    vec!["--dpi-desync-cutoff=n2".into()],
                 ),
             },
             Strategy {
                 id: "win-alt3".to_string(),
                 name: "Windows ALT3 (Fake + Hostfakesplit)".to_string(),
-                description: "Fake TLS ClientHello + hostfakesplit with badsum fooling for aggressive DPI boxes.".to_string(),
+                description: "Fake TLS ClientHello + hostfakesplit with altorder modifier for resistant ISP nodes.".to_string(),
                 platform: Platform::Windows,
-                args: build_8rule(
-                    "fake,hostfakesplit",
-                    vec!["--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts,badsum".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
-                    vec!["--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts,badsum".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
-                    vec!["--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts,badsum".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
-                    vec!["--dpi-desync-split-pos=1".into(), "--dpi-desync-fooling=ts,badsum".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
-                    10,
-                ),
-            },
-            Strategy {
-                id: "win-alt10".to_string(),
-                name: "Windows ALT10 (Pure Multisplit)".to_string(),
-                description: "Pure multi-split at SNI and SLD boundaries without fake payloads.".to_string(),
-                platform: Platform::Windows,
-                args: build_8rule(
-                    "multisplit",
-                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,midsld".into()],
-                    vec!["--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,midsld".into()],
-                    vec!["--dpi-desync-split-seqovl=664".into(), "--dpi-desync-split-pos=1,midsld".into()],
-                    vec!["--dpi-desync-split-seqovl=664".into(), "--dpi-desync-split-pos=1,midsld".into()],
-                    8,
+                args: build_windows_flowseal_rules(
+                    vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru".into(), "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru".into(), "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync-cutoff=n4".into()],
                 ),
             },
             Strategy {
                 id: "win-simple-fake".to_string(),
-                name: "Windows Simple Fake (Fast Low-Overhead)".to_string(),
-                description: "Low-overhead fake packet injection with TCP timestamp fooling.".to_string(),
+                name: "Windows Simple Fake (Fast Injection)".to_string(),
+                description: "Lightweight fake TLS ClientHello injection with timestamp fooling.".to_string(),
                 platform: Platform::Windows,
-                args: build_8rule(
-                    "fake",
-                    vec!["--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
-                    vec!["--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
-                    vec!["--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
-                    vec!["--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_m), format!("--dpi-desync-fake-http={}", tls_m)],
-                    6,
+                args: build_windows_flowseal_rules(
+                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_4)],
+                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_4)],
+                    vec!["--dpi-desync-cutoff=n3".into()],
                 ),
             },
         ]
