@@ -237,6 +237,13 @@ impl UnblockEngine {
             let _ = self.proxy_mgr.disable_macos_proxy();
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            let _ = silent_command("taskkill.exe")
+                .args(["/F", "/IM", "winws.exe"])
+                .status();
+        }
+
         self.state = EngineState::Stopped;
         Ok(())
     }

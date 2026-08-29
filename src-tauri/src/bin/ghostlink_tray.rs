@@ -53,7 +53,7 @@ mod windows_tray {
         if let Some(first) = tunnels.first() {
             first.name.clone()
         } else {
-            "wg0".to_string()
+            "wg0-pc".to_string()
         }
     }
 
@@ -81,7 +81,7 @@ mod windows_tray {
             }
         }
 
-        // 2. DwmSetWindowAttribute for Immersive Dark Mode (attribute 20 for Win11/Win10 2004+, 19 for older Win10)
+        // 2. DwmSetWindowAttribute for Immersive Dark Mode
         let dwmapi_dll = LoadLibraryW(to_wide_null("dwmapi.dll").as_ptr());
         if !dwmapi_dll.is_null() {
             type FnDwmSetWindowAttribute = unsafe extern "system" fn(HWND, u32, *const std::ffi::c_void, u32) -> i32;
@@ -357,11 +357,11 @@ mod windows_tray {
             return;
         }
 
-        // 1. GhostLink Engine Toggle (Active / Inactive)
+        // 1. GhostLink Engine Toggle (Active shows ✓, Inactive shows clean text)
         let gl_label = if st.is_gl_running {
-            format!("●  GhostLink: ACTIVE [{}] (Click to Stop)", st.active_strategy_name)
+            format!("✓  GhostLink: Active [{}]", st.active_strategy_name)
         } else {
-            "○  GhostLink: Inactive (Click to Start)".to_string()
+            "GhostLink: Inactive (Click to Start)".to_string()
         };
         let mut gl_flags = MF_STRING;
         if st.is_gl_running {
@@ -372,11 +372,11 @@ mod windows_tray {
             CheckMenuItem(hmenu, ID_GHOSTLINK_TOGGLE as u32, MF_BYCOMMAND | MF_CHECKED);
         }
 
-        // 2. WireGuard Toggle (Checked with checkmark if connected)
+        // 2. WireGuard Toggle (Active shows ✓, Inactive shows clean text)
         let wg_label = if st.wireguard_connected {
-            format!("✓  🌍 Full VPN (WireGuard): {} [Connected]", st.wireguard_tunnel_name)
+            format!("✓  Full VPN (WireGuard): {} [Connected]", st.wireguard_tunnel_name)
         } else {
-            format!("    🌍 Full VPN (WireGuard): {} [Disconnected]", st.wireguard_tunnel_name)
+            format!("Full VPN (WireGuard): {} [Disconnected]", st.wireguard_tunnel_name)
         };
         let mut wg_flags = MF_STRING;
         if st.wireguard_connected {
@@ -389,14 +389,14 @@ mod windows_tray {
 
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
-        // 3. Strategy Submenu (Checked on active strategy)
+        // 3. Strategy Submenu (Active strategy shows ✓, others clean text)
         let hstrat_menu = CreatePopupMenu();
         for (idx, strat) in st.strategies.iter().enumerate() {
             let is_active = strat.id == st.active_strategy_id;
             let label = if is_active {
                 format!("✓  {} ({})", strat.name, strat.id)
             } else {
-                format!("    {} ({})", strat.name, strat.id)
+                format!("{} ({})", strat.name, strat.id)
             };
             let mut s_flags = MF_STRING;
             if is_active {
@@ -421,9 +421,9 @@ mod windows_tray {
 
         // 6. Start at Login
         let auto_label = if st.autostart_enabled {
-            "✓  🚀 Start at Login".to_string()
+            "✓  Start at Login".to_string()
         } else {
-            "    🚀 Start at Login".to_string()
+            "Start at Login".to_string()
         };
         let mut auto_flags = MF_STRING;
         if st.autostart_enabled {
@@ -492,20 +492,48 @@ mod windows_tray {
                     let client_guard = GLOBAL_CLIENT.lock().unwrap();
                     if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
                         rt.block_on(async {
-                            let is_running = {
-                                let st = state_arc.lock().unwrap();
-                                st.is_gl_running
-                            };
-                            if is_running {
-                                let _ = client.stop().await;
-                                notify("GhostLink", "GhostLink DPI Bypass stopped");
+                            // Query live status from daemon to be 100% synchronized
+                            let is_currently_running = if client.is_daemon_alive().await {
+                                match client.get_status().await {
+                                    Ok(status) => status.is_running,
+                                    Err(_) => state_arc.lock().unwrap().is_gl_running,
+                                }
                             } else {
+                                state_arc.lock().unwrap().is_gl_running
+                            };
+
+                            if is_currently_running {
+                                // Turn OFF / Stop engine
+                                match client.stop().await {
+                                    Ok(_) => {
+                                        {
+                                            let mut st = state_arc.lock().unwrap();
+                                            st.is_gl_running = false;
+                                        }
+                                        notify("GhostLink", "GhostLink DPI Bypass stopped");
+                                    }
+                                    Err(e) => {
+                                        notify("GhostLink Error", &format!("Failed to stop engine: {}", e));
+                                    }
+                                }
+                            } else {
+                                // Turn ON / Start engine
                                 let strat_id = {
                                     let st = state_arc.lock().unwrap();
                                     st.active_strategy_id.clone()
                                 };
-                                let _ = client.start(&strat_id, None, true).await;
-                                notify("GhostLink", "GhostLink DPI Bypass is now ACTIVE");
+                                match client.start(&strat_id, None, true).await {
+                                    Ok(_) => {
+                                        {
+                                            let mut st = state_arc.lock().unwrap();
+                                            st.is_gl_running = true;
+                                        }
+                                        notify("GhostLink", "GhostLink DPI Bypass is now ACTIVE");
+                                    }
+                                    Err(e) => {
+                                        notify("GhostLink Error", &format!("Failed to start engine: {}", e));
+                                    }
+                                }
                             }
                         });
                     }
@@ -518,15 +546,46 @@ mod windows_tray {
                         let st = state_arc.lock().unwrap();
                         st.wireguard_tunnel_name.clone()
                     };
-                    let new_state = WireGuardManager::toggle(&tunnel);
-                    match new_state {
-                        Ok(WireGuardState::Connected) => {
-                            notify("GhostLink VPN", &format!("WireGuard [{}] Connected", tunnel));
-                        }
-                        Ok(WireGuardState::Disconnected) => {
-                            notify("GhostLink VPN", &format!("WireGuard [{}] Disconnected", tunnel));
-                        }
-                        _ => {}
+
+                    let rt_guard = GLOBAL_RUNTIME.lock().unwrap();
+                    let client_guard = GLOBAL_CLIENT.lock().unwrap();
+                    if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
+                        rt.block_on(async {
+                            let res = if client.is_daemon_alive().await {
+                                client.wireguard_toggle(&tunnel).await
+                            } else {
+                                WireGuardManager::toggle(&tunnel)
+                            };
+
+                            match res {
+                                Ok(WireGuardState::Connected) => {
+                                    {
+                                        let mut st = state_arc.lock().unwrap();
+                                        st.wireguard_connected = true;
+                                    }
+                                    notify("GhostLink VPN", &format!("WireGuard [{}] Connected", tunnel));
+                                }
+                                Ok(WireGuardState::Disconnected) => {
+                                    {
+                                        let mut st = state_arc.lock().unwrap();
+                                        st.wireguard_connected = false;
+                                    }
+                                    notify("GhostLink VPN", &format!("WireGuard [{}] Disconnected", tunnel));
+                                }
+                                Ok(WireGuardState::Connecting) => {
+                                    notify("GhostLink VPN", &format!("WireGuard [{}] Connecting...", tunnel));
+                                }
+                                Ok(WireGuardState::Disconnecting) => {
+                                    notify("GhostLink VPN", &format!("WireGuard [{}] Disconnecting...", tunnel));
+                                }
+                                Ok(WireGuardState::Unknown(msg)) => {
+                                    notify("GhostLink VPN", &format!("WireGuard state: {}", msg));
+                                }
+                                Err(e) => {
+                                    notify("GhostLink VPN Error", &format!("Failed to toggle WireGuard: {}", e));
+                                }
+                            }
+                        });
                     }
                     refresh_state_from_daemon(hwnd_val);
                 });
