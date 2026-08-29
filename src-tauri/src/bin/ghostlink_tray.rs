@@ -1,5 +1,3 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 #[cfg(target_os = "windows")]
 mod windows_tray {
     use anyhow::Result;
@@ -50,6 +48,7 @@ mod windows_tray {
 
     fn detect_primary_wg_tunnel() -> String {
         let tunnels = WireGuardManager::list_tunnels();
+        eprintln!("🔍 [Tray Init] Discovered WireGuard tunnels: {:?}", tunnels);
         if let Some(first) = tunnels.first() {
             first.name.clone()
         } else {
@@ -59,7 +58,6 @@ mod windows_tray {
 
     /// Enable native Dark Mode for Win32 menus and windows on Windows 10/11
     unsafe fn enable_dark_mode(hwnd: HWND) {
-        // 1. SetPreferredAppMode (ordinal 135) in uxtheme.dll (ForceDark = 2 / AllowDark = 1)
         let uxtheme_dll = LoadLibraryW(to_wide_null("uxtheme.dll").as_ptr());
         if !uxtheme_dll.is_null() {
             type FnSetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
@@ -81,7 +79,6 @@ mod windows_tray {
             }
         }
 
-        // 2. DwmSetWindowAttribute for Immersive Dark Mode
         let dwmapi_dll = LoadLibraryW(to_wide_null("dwmapi.dll").as_ptr());
         if !dwmapi_dll.is_null() {
             type FnDwmSetWindowAttribute = unsafe extern "system" fn(HWND, u32, *const std::ffi::c_void, u32) -> i32;
@@ -106,33 +103,27 @@ mod windows_tray {
                 let fx = x as f32;
                 let fy = y as f32;
 
-                // Ghost Head: rounded dome
                 let in_head = (fx - 15.5) * (fx - 15.5) + (fy - 12.0) * (fy - 12.0) <= 9.0 * 9.0 && fy <= 12.0;
-                // Ghost Body: torso
                 let in_body = fx >= 6.5 && fx <= 24.5 && fy > 12.0 && fy <= 22.0;
-                // Ghost Skirt: wavy bottom
                 let wave = ((fx * 0.75).sin() * 2.2).round();
                 let in_skirt = fx >= 6.5 && fx <= 24.5 && fy > 22.0 && fy <= (24.0 + wave);
 
                 if in_head || in_body || in_skirt {
-                    // Cute Eyes (dark blue with bright white sparkle)
                     let in_left_eye = (fx - 11.5) * (fx - 11.5) / 1.6 + (fy - 13.5) * (fy - 13.5) / 4.0 <= 1.0;
                     let in_right_eye = (fx - 19.5) * (fx - 19.5) / 1.6 + (fy - 13.5) * (fy - 13.5) / 4.0 <= 1.0;
                     let in_left_twinkle = (x == 11 || x == 12) && (y == 12);
                     let in_right_twinkle = (x == 19 || x == 20) && (y == 12);
 
-                    // Cute soft pink blush
                     let in_left_blush = (x == 8 || x == 9) && (y == 16 || y == 17);
                     let in_right_blush = (x == 22 || x == 23) && (y == 16 || y == 17);
 
                     let pixel = if in_left_twinkle || in_right_twinkle {
-                        0xFFFFFFFF // White star twinkle
+                        0xFFFFFFFF
                     } else if in_left_eye || in_right_eye {
-                        0xFF0B1426 // Deep dark indigo
+                        0xFF0B1426
                     } else if in_left_blush || in_right_blush {
-                        0xFFFF7BA9 // Soft kawaii pink blush
+                        0xFFFF7BA9
                     } else {
-                        // Radiant celestial cyan-to-white gradient
                         let ratio = ((fy - 3.0) / 24.0).clamp(0.0, 1.0);
                         let r = (245.0 * (1.0 - ratio) + 0.0 * ratio) as u32;
                         let g = (255.0 * (1.0 - ratio) + 215.0 * ratio) as u32;
@@ -143,7 +134,6 @@ mod windows_tray {
                     let idx = (y * width + x) as usize;
                     color_pixels[idx] = pixel;
 
-                    // Unmask pixel in 1-bit transparency mask
                     let row_bytes = ((width + 31) / 32 * 4) as usize;
                     let byte_idx = (y as usize) * row_bytes + (x as usize / 8);
                     let bit_idx = 7 - (x % 8);
@@ -172,6 +162,10 @@ mod windows_tray {
     }
 
     pub fn run_tray() -> Result<()> {
+        println!("===============================================================");
+        println!(" 👻 GhostLink System Tray (Debug Console Live Monitor Active)");
+        println!("===============================================================");
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -184,12 +178,15 @@ mod windows_tray {
         let default_strat_name = strategies.first().map(|s| s.name.clone()).unwrap_or_else(|| "Windows General".to_string());
         let detected_wg = detect_primary_wg_tunnel();
 
+        let initial_wg_state = WireGuardManager::status(&detected_wg) == WireGuardState::Connected;
+        println!("🚀 [Init] WireGuard Tunnel Detected: '{}' | Live Connected: {}", detected_wg, initial_wg_state);
+
         let state = Arc::new(Mutex::new(TrayState {
             is_gl_running: false,
             active_strategy_id: default_strat_id,
             active_strategy_name: default_strat_name,
             wireguard_tunnel_name: detected_wg,
-            wireguard_connected: false,
+            wireguard_connected: initial_wg_state,
             autostart_enabled: AutoStartManager::is_enabled(),
             strategies,
         }));
@@ -240,10 +237,8 @@ mod windows_tray {
                 return Err(anyhow::anyhow!("Failed to create message window"));
             }
 
-            // Apply Immersive Dark Mode to window and menus
             enable_dark_mode(hwnd);
 
-            // Create Tray Icon with customized Ghost icon
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;
@@ -259,20 +254,18 @@ mod windows_tray {
 
             Shell_NotifyIconW(NIM_ADD, &nid);
 
-            // Start 1.5s refresh timer
             SetTimer(hwnd, TIMER_ID, 1500, None);
 
-            // Initial sync
             refresh_state_from_daemon(hwnd as usize);
 
-            // Message Loop
+            println!("✅ Tray Icon active in taskbar. Click the 👻 icon to open menu.");
+
             let mut msg: MSG = std::mem::zeroed();
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
 
-            // Cleanup Tray Icon
             Shell_NotifyIconW(NIM_DELETE, &nid);
         }
 
@@ -321,7 +314,6 @@ mod windows_tray {
             st.wireguard_connected = is_wg_active;
             st.autostart_enabled = is_autostart;
 
-            // Update Tooltip
             let tip_text = format!(
                 "GhostLink: {}\nStrategy: {}\nWireGuard: {}",
                 if st.is_gl_running { "ACTIVE 🟢" } else { "IDLE ⚪" },
@@ -357,7 +349,7 @@ mod windows_tray {
             return;
         }
 
-        // 1. GhostLink Engine Toggle (Active shows ✓, Inactive shows clean text)
+        // 1. GhostLink Engine Toggle
         let gl_label = if st.is_gl_running {
             format!("✓  GhostLink: Active [{}]", st.active_strategy_name)
         } else {
@@ -372,7 +364,7 @@ mod windows_tray {
             CheckMenuItem(hmenu, ID_GHOSTLINK_TOGGLE as u32, MF_BYCOMMAND | MF_CHECKED);
         }
 
-        // 2. WireGuard Toggle (Active shows ✓, Inactive shows clean text)
+        // 2. WireGuard Toggle
         let wg_label = if st.wireguard_connected {
             format!("✓  Full VPN (WireGuard): {} [Connected]", st.wireguard_tunnel_name)
         } else {
@@ -389,7 +381,7 @@ mod windows_tray {
 
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
-        // 3. Strategy Submenu (Active strategy shows ✓, others clean text)
+        // 3. Strategy Submenu
         let hstrat_menu = CreatePopupMenu();
         for (idx, strat) in st.strategies.iter().enumerate() {
             let is_active = strat.id == st.active_strategy_id;
@@ -492,8 +484,10 @@ mod windows_tray {
                     let client_guard = GLOBAL_CLIENT.lock().unwrap();
                     if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
                         rt.block_on(async {
-                            // Query live status from daemon to be 100% synchronized
-                            let is_currently_running = if client.is_daemon_alive().await {
+                            let is_daemon_alive = client.is_daemon_alive().await;
+                            println!("\n👉 [User Click] GHOSTLINK TOGGLE | Daemon alive: {}", is_daemon_alive);
+
+                            let is_currently_running = if is_daemon_alive {
                                 match client.get_status().await {
                                     Ok(status) => status.is_running,
                                     Err(_) => state_arc.lock().unwrap().is_gl_running,
@@ -502,35 +496,41 @@ mod windows_tray {
                                 state_arc.lock().unwrap().is_gl_running
                             };
 
+                            println!("   Current Engine State: {}", if is_currently_running { "RUNNING" } else { "STOPPED" });
+
                             if is_currently_running {
-                                // Turn OFF / Stop engine
+                                println!("   -> Executing STOP...");
                                 match client.stop().await {
                                     Ok(_) => {
                                         {
                                             let mut st = state_arc.lock().unwrap();
                                             st.is_gl_running = false;
                                         }
+                                        println!("   ✅ Engine STOPPED successfully.");
                                         notify("GhostLink", "GhostLink DPI Bypass stopped");
                                     }
                                     Err(e) => {
+                                        eprintln!("   ❌ Failed to stop engine: {}", e);
                                         notify("GhostLink Error", &format!("Failed to stop engine: {}", e));
                                     }
                                 }
                             } else {
-                                // Turn ON / Start engine
                                 let strat_id = {
                                     let st = state_arc.lock().unwrap();
                                     st.active_strategy_id.clone()
                                 };
+                                println!("   -> Executing START with strategy '{}'...", strat_id);
                                 match client.start(&strat_id, None, true).await {
                                     Ok(_) => {
                                         {
                                             let mut st = state_arc.lock().unwrap();
                                             st.is_gl_running = true;
                                         }
+                                        println!("   ✅ Engine STARTED successfully.");
                                         notify("GhostLink", "GhostLink DPI Bypass is now ACTIVE");
                                     }
                                     Err(e) => {
+                                        eprintln!("   ❌ Failed to start engine: {}", e);
                                         notify("GhostLink Error", &format!("Failed to start engine: {}", e));
                                     }
                                 }
@@ -547,13 +547,20 @@ mod windows_tray {
                         st.wireguard_tunnel_name.clone()
                     };
 
+                    println!("\n👉 [User Click] WIREGUARD TOGGLE for tunnel: '{}'", tunnel);
+
                     let rt_guard = GLOBAL_RUNTIME.lock().unwrap();
                     let client_guard = GLOBAL_CLIENT.lock().unwrap();
                     if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
                         rt.block_on(async {
-                            let res = if client.is_daemon_alive().await {
+                            let is_daemon_alive = client.is_daemon_alive().await;
+                            println!("   Daemon active: {}", is_daemon_alive);
+
+                            let res = if is_daemon_alive {
+                                println!("   Delegating WireGuard toggle to privileged daemon...");
                                 client.wireguard_toggle(&tunnel).await
                             } else {
+                                println!("   Running WireGuard toggle locally...");
                                 WireGuardManager::toggle(&tunnel)
                             };
 
@@ -563,6 +570,7 @@ mod windows_tray {
                                         let mut st = state_arc.lock().unwrap();
                                         st.wireguard_connected = true;
                                     }
+                                    println!("   ✅ WireGuard [{}] is now CONNECTED.", tunnel);
                                     notify("GhostLink VPN", &format!("WireGuard [{}] Connected", tunnel));
                                 }
                                 Ok(WireGuardState::Disconnected) => {
@@ -570,18 +578,23 @@ mod windows_tray {
                                         let mut st = state_arc.lock().unwrap();
                                         st.wireguard_connected = false;
                                     }
+                                    println!("   ✅ WireGuard [{}] is now DISCONNECTED.", tunnel);
                                     notify("GhostLink VPN", &format!("WireGuard [{}] Disconnected", tunnel));
                                 }
                                 Ok(WireGuardState::Connecting) => {
+                                    println!("   ⏳ WireGuard [{}] Connecting...", tunnel);
                                     notify("GhostLink VPN", &format!("WireGuard [{}] Connecting...", tunnel));
                                 }
                                 Ok(WireGuardState::Disconnecting) => {
+                                    println!("   ⏳ WireGuard [{}] Disconnecting...", tunnel);
                                     notify("GhostLink VPN", &format!("WireGuard [{}] Disconnecting...", tunnel));
                                 }
                                 Ok(WireGuardState::Unknown(msg)) => {
+                                    println!("   ❓ WireGuard [{}] State: {}", tunnel, msg);
                                     notify("GhostLink VPN", &format!("WireGuard state: {}", msg));
                                 }
                                 Err(e) => {
+                                    eprintln!("   ❌ WireGuard toggle failed: {}", e);
                                     notify("GhostLink VPN Error", &format!("Failed to toggle WireGuard: {}", e));
                                 }
                             }
@@ -655,6 +668,7 @@ mod windows_tray {
                 }
             }
             ID_QUIT => {
+                println!("🚪 [Tray] Exiting GhostLink System Tray...");
                 unsafe {
                     DestroyWindow(hwnd);
                 }
@@ -673,6 +687,7 @@ mod windows_tray {
                         if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
                             rt.block_on(async {
                                 let _ = client.start(&strat.id, None, true).await;
+                                println!("⚡ [Strategy Switch] Switched to: {}", strat.name);
                                 notify("GhostLink", &format!("Strategy switched to: {}", strat.name));
                             });
                         }

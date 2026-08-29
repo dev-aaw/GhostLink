@@ -82,21 +82,21 @@ impl WireGuardManager {
                 }
             }
 
-            // Also check running Windows services
-            let output = silent_command("sc.exe")
-                .args(["query", "type=", "service", "state=", "all"])
+            // Also check running Windows network adapters
+            let output = silent_command("netsh.exe")
+                .args(["interface", "show", "interface"])
                 .output();
 
             if let Ok(out) = output {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("SERVICE_NAME: WireGuardTunnel$") {
-                        let name = trimmed.trim_start_matches("SERVICE_NAME: WireGuardTunnel$").to_string();
-                        if !tunnels.iter().any(|t| t.name == name) {
-                            let state = Self::status(&name);
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(last) = parts.last() {
+                        let iface_name = *last;
+                        if (iface_name.starts_with("wg") || iface_name.contains("WireGuard")) && !tunnels.iter().any(|t| t.name == iface_name) {
+                            let state = Self::status(iface_name);
                             tunnels.push(WireGuardTunnelInfo {
-                                name,
+                                name: iface_name.to_string(),
                                 service_id: "".to_string(),
                                 state,
                             });
@@ -108,9 +108,9 @@ impl WireGuardManager {
             if tunnels.is_empty() {
                 // Fallback default tunnel identifier
                 tunnels.push(WireGuardTunnelInfo {
-                    name: "wg0".to_string(),
+                    name: "wg0-pc".to_string(),
                     service_id: "".to_string(),
-                    state: Self::status("wg0"),
+                    state: Self::status("wg0-pc"),
                 });
             }
 
@@ -146,6 +146,23 @@ impl WireGuardManager {
         }
         #[cfg(target_os = "windows")]
         {
+            // Primary check: netsh interface status (instant, zero admin privileges required)
+            let output = silent_command("netsh.exe")
+                .args(["interface", "show", "interface", tunnel_name])
+                .output();
+
+            if let Ok(out) = output {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if stdout.contains("Connected") || stdout.contains("Bağlandı") {
+                    return WireGuardState::Connected;
+                } else if stdout.contains("Connecting") || stdout.contains("Bağlanıyor") {
+                    return WireGuardState::Connecting;
+                } else if stdout.contains("Disconnected") || stdout.contains("Bağlantı kesildi") {
+                    return WireGuardState::Disconnected;
+                }
+            }
+
+            // Secondary check: Windows Service status
             let svc_name = format!("WireGuardTunnel${}", tunnel_name);
             let output = silent_command("sc.exe")
                 .args(["query", &svc_name])
@@ -154,17 +171,15 @@ impl WireGuardManager {
             if let Ok(out) = output {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 if stdout.contains("RUNNING") {
-                    WireGuardState::Connected
+                    return WireGuardState::Connected;
                 } else if stdout.contains("START_PENDING") {
-                    WireGuardState::Connecting
+                    return WireGuardState::Connecting;
                 } else if stdout.contains("STOP_PENDING") {
-                    WireGuardState::Disconnecting
-                } else {
-                    WireGuardState::Disconnected
+                    return WireGuardState::Disconnecting;
                 }
-            } else {
-                WireGuardState::Disconnected
             }
+
+            WireGuardState::Disconnected
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
@@ -190,22 +205,24 @@ impl WireGuardManager {
         }
         #[cfg(target_os = "windows")]
         {
+            eprintln!("[WireGuard::connect] Initiating connection for '{}'", tunnel_name);
             let svc_name = format!("WireGuardTunnel${}", tunnel_name);
             let conf_dpapi = format!(r"C:\Program Files\WireGuard\Data\Configurations\{}.conf.dpapi", tunnel_name);
             let conf_plain = format!(r"C:\Program Files\WireGuard\Data\Configurations\{}.conf", tunnel_name);
 
-            // If service already exists, start it
+            // 1. Try starting service if already installed
             let status = silent_command("net.exe")
                 .args(["start", &svc_name])
                 .status();
 
             if let Ok(s) = status {
                 if s.success() {
+                    eprintln!("[WireGuard::connect] Service '{}' started successfully via net.exe", svc_name);
                     return Ok(());
                 }
             }
 
-            // Otherwise install service using wireguard.exe
+            // 2. Try installing and starting service via wireguard.exe
             let conf_path = if std::path::Path::new(&conf_dpapi).exists() {
                 conf_dpapi
             } else {
@@ -216,11 +233,25 @@ impl WireGuardManager {
             if std::path::Path::new(wg_exe).exists() {
                 let status = silent_command(wg_exe)
                     .args(["/installtunnelservice", &conf_path])
-                    .status()?;
+                    .status();
 
-                if !status.success() {
-                    return Err(anyhow!("wireguard.exe /installtunnelservice failed with code {:?}", status.code()));
+                if let Ok(s) = status {
+                    if s.success() {
+                        eprintln!("[WireGuard::connect] wireguard.exe /installtunnelservice succeeded for '{}'", conf_path);
+                        return Ok(());
+                    }
                 }
+
+                // 3. Fallback: Request elevated execution via PowerShell runAs
+                eprintln!("[WireGuard::connect] Non-elevated install failed, attempting elevated start via runAs...");
+                let ps_arg = format!(
+                    "Start-Process -FilePath '{}' -ArgumentList '/installtunnelservice', '{}' -Verb runAs -WindowStyle Hidden -Wait",
+                    wg_exe, conf_path
+                );
+                let _ = silent_command("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_arg])
+                    .status();
+
                 Ok(())
             } else {
                 Err(anyhow!("WireGuard is not installed at {}", wg_exe))
@@ -250,17 +281,36 @@ impl WireGuardManager {
         }
         #[cfg(target_os = "windows")]
         {
+            eprintln!("[WireGuard::disconnect] Initiating disconnection for '{}'", tunnel_name);
             let wg_exe = r"C:\Program Files\WireGuard\wireguard.exe";
+            let svc_name = format!("WireGuardTunnel${}", tunnel_name);
+
+            // 1. Try wireguard.exe /uninstalltunnelservice
             if std::path::Path::new(wg_exe).exists() {
-                let _ = silent_command(wg_exe)
+                let status = silent_command(wg_exe)
                     .args(["/uninstalltunnelservice", tunnel_name])
                     .status();
+                eprintln!("[WireGuard::disconnect] wireguard.exe /uninstalltunnelservice status: {:?}", status);
             }
 
-            let svc_name = format!("WireGuardTunnel${}", tunnel_name);
-            let _ = silent_command("net.exe")
+            // 2. Try net.exe stop
+            let net_status = silent_command("net.exe")
                 .args(["stop", &svc_name])
                 .status();
+            eprintln!("[WireGuard::disconnect] net.exe stop status: {:?}", net_status);
+
+            // 3. Fallback: Request elevated uninstall via PowerShell runAs
+            let current_state = Self::status(tunnel_name);
+            if current_state == WireGuardState::Connected {
+                eprintln!("[WireGuard::disconnect] Tunnel still connected, attempting elevated uninstall via runAs...");
+                let ps_arg = format!(
+                    "Start-Process -FilePath '{}' -ArgumentList '/uninstalltunnelservice', '{}' -Verb runAs -WindowStyle Hidden -Wait",
+                    wg_exe, tunnel_name
+                );
+                let _ = silent_command("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_arg])
+                    .status();
+            }
 
             Ok(())
         }
@@ -289,14 +339,23 @@ impl WireGuardManager {
     /// Toggle WireGuard tunnel state.
     pub fn toggle_exclusive(tunnel_name: &str) -> Result<WireGuardState> {
         let current = Self::status(tunnel_name);
+        eprintln!("[WireGuard::toggle] Tunnel: '{}' | Current detected state: {:?}", tunnel_name, current);
         match current {
             WireGuardState::Connected => {
+                eprintln!("[WireGuard::toggle] -> Executing DISCONNECT branch for '{}'", tunnel_name);
                 Self::disconnect(tunnel_name)?;
-                Ok(WireGuardState::Disconnected)
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let new_state = Self::status(tunnel_name);
+                eprintln!("[WireGuard::toggle] -> Post-disconnect state: {:?}", new_state);
+                Ok(new_state)
             }
             _ => {
+                eprintln!("[WireGuard::toggle] -> Executing CONNECT branch for '{}'", tunnel_name);
                 Self::connect_exclusive(tunnel_name)?;
-                Ok(WireGuardState::Connected)
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let new_state = Self::status(tunnel_name);
+                eprintln!("[WireGuard::toggle] -> Post-connect state: {:?}", new_state);
+                Ok(new_state)
             }
         }
     }
