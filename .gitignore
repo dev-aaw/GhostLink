@@ -1,0 +1,25 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# GhostLink local runtime data (root only)
+/bin/
+/lists/
+.ghostlink/
+/temp/
