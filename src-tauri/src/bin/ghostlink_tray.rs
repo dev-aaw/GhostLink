@@ -12,7 +12,8 @@ mod windows_tray {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use windows_sys::Win32::Foundation::*;
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::Graphics::Gdi::*;
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
     use windows_sys::Win32::UI::Shell::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -56,6 +57,120 @@ mod windows_tray {
         }
     }
 
+    /// Enable native Dark Mode for Win32 menus and windows on Windows 10/11
+    unsafe fn enable_dark_mode(hwnd: HWND) {
+        // 1. SetPreferredAppMode (ordinal 135) in uxtheme.dll (ForceDark = 2 / AllowDark = 1)
+        let uxtheme_dll = LoadLibraryW(to_wide_null("uxtheme.dll").as_ptr());
+        if !uxtheme_dll.is_null() {
+            type FnSetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
+            type FnFlushMenuThemes = unsafe extern "system" fn();
+
+            if let Some(proc) = GetProcAddress(uxtheme_dll, 135 as *const u8) {
+                let set_mode: FnSetPreferredAppMode = std::mem::transmute(proc);
+                set_mode(2); // ForceDark
+            }
+            if let Some(proc) = GetProcAddress(uxtheme_dll, 136 as *const u8) {
+                let flush: FnFlushMenuThemes = std::mem::transmute(proc);
+                flush();
+            }
+            if let Some(proc) = GetProcAddress(uxtheme_dll, b"SetWindowTheme\0".as_ptr()) {
+                type FnSetWindowTheme = unsafe extern "system" fn(HWND, *const u16, *const u16) -> i32;
+                let set_theme: FnSetWindowTheme = std::mem::transmute(proc);
+                let theme_name = to_wide_null("DarkMode_Explorer");
+                set_theme(hwnd, theme_name.as_ptr(), std::ptr::null());
+            }
+        }
+
+        // 2. DwmSetWindowAttribute for Immersive Dark Mode (attribute 20 for Win11/Win10 2004+, 19 for older Win10)
+        let dwmapi_dll = LoadLibraryW(to_wide_null("dwmapi.dll").as_ptr());
+        if !dwmapi_dll.is_null() {
+            type FnDwmSetWindowAttribute = unsafe extern "system" fn(HWND, u32, *const std::ffi::c_void, u32) -> i32;
+            if let Some(proc) = GetProcAddress(dwmapi_dll, b"DwmSetWindowAttribute\0".as_ptr()) {
+                let dwm_set_attr: FnDwmSetWindowAttribute = std::mem::transmute(proc);
+                let dark: i32 = 1;
+                let _ = dwm_set_attr(hwnd, 20, &dark as *const _ as *const _, std::mem::size_of::<i32>() as u32);
+                let _ = dwm_set_attr(hwnd, 19, &dark as *const _ as *const _, std::mem::size_of::<i32>() as u32);
+            }
+        }
+    }
+
+    /// Generate a stylized, neon-cyan glowing 👻 GhostLink icon for the System Tray
+    unsafe fn create_ghostlink_icon() -> HICON {
+        let width: u32 = 32;
+        let height: u32 = 32;
+        let mut color_pixels = vec![0u32; (width * height) as usize];
+        let mut mask_pixels = vec![0xFFu8; ((width + 31) / 32 * 4 * height) as usize];
+
+        for y in 0..height {
+            for x in 0..width {
+                let fx = x as f32;
+                let fy = y as f32;
+
+                // Ghost Head: rounded dome
+                let in_head = (fx - 15.5) * (fx - 15.5) + (fy - 12.0) * (fy - 12.0) <= 9.0 * 9.0 && fy <= 12.0;
+                // Ghost Body: torso
+                let in_body = fx >= 6.5 && fx <= 24.5 && fy > 12.0 && fy <= 22.0;
+                // Ghost Skirt: wavy bottom
+                let wave = ((fx * 0.75).sin() * 2.2).round();
+                let in_skirt = fx >= 6.5 && fx <= 24.5 && fy > 22.0 && fy <= (24.0 + wave);
+
+                if in_head || in_body || in_skirt {
+                    // Cute Eyes (dark blue with bright white sparkle)
+                    let in_left_eye = (fx - 11.5) * (fx - 11.5) / 1.6 + (fy - 13.5) * (fy - 13.5) / 4.0 <= 1.0;
+                    let in_right_eye = (fx - 19.5) * (fx - 19.5) / 1.6 + (fy - 13.5) * (fy - 13.5) / 4.0 <= 1.0;
+                    let in_left_twinkle = (x == 11 || x == 12) && (y == 12);
+                    let in_right_twinkle = (x == 19 || x == 20) && (y == 12);
+
+                    // Cute soft pink blush
+                    let in_left_blush = (x == 8 || x == 9) && (y == 16 || y == 17);
+                    let in_right_blush = (x == 22 || x == 23) && (y == 16 || y == 17);
+
+                    let pixel = if in_left_twinkle || in_right_twinkle {
+                        0xFFFFFFFF // White star twinkle
+                    } else if in_left_eye || in_right_eye {
+                        0xFF0B1426 // Deep dark indigo
+                    } else if in_left_blush || in_right_blush {
+                        0xFFFF7BA9 // Soft kawaii pink blush
+                    } else {
+                        // Radiant celestial cyan-to-white gradient
+                        let ratio = ((fy - 3.0) / 24.0).clamp(0.0, 1.0);
+                        let r = (245.0 * (1.0 - ratio) + 0.0 * ratio) as u32;
+                        let g = (255.0 * (1.0 - ratio) + 215.0 * ratio) as u32;
+                        let b = (255.0 * (1.0 - ratio) + 255.0 * ratio) as u32;
+                        0xFF000000 | (r << 16) | (g << 8) | b
+                    };
+
+                    let idx = (y * width + x) as usize;
+                    color_pixels[idx] = pixel;
+
+                    // Unmask pixel in 1-bit transparency mask
+                    let row_bytes = ((width + 31) / 32 * 4) as usize;
+                    let byte_idx = (y as usize) * row_bytes + (x as usize / 8);
+                    let bit_idx = 7 - (x % 8);
+                    mask_pixels[byte_idx] &= !(1 << bit_idx);
+                }
+            }
+        }
+
+        let hbm_color = CreateBitmap(width as i32, height as i32, 1, 32, color_pixels.as_ptr() as _);
+        let hbm_mask = CreateBitmap(width as i32, height as i32, 1, 1, mask_pixels.as_ptr() as _);
+
+        let mut icon_info: ICONINFO = std::mem::zeroed();
+        icon_info.fIcon = 1;
+        icon_info.hbmColor = hbm_color;
+        icon_info.hbmMask = hbm_mask;
+
+        let hicon = CreateIconIndirect(&icon_info);
+        DeleteObject(hbm_color as _);
+        DeleteObject(hbm_mask as _);
+
+        if hicon.is_null() {
+            LoadIconW(std::ptr::null_mut(), IDI_APPLICATION)
+        } else {
+            hicon
+        }
+    }
+
     pub fn run_tray() -> Result<()> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -87,6 +202,8 @@ mod windows_tray {
             let hinstance = GetModuleHandleW(std::ptr::null());
             let class_name = to_wide_null("GhostLinkTrayClass");
 
+            let ghost_icon = create_ghostlink_icon();
+
             let wnd_class = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: 0,
@@ -94,12 +211,12 @@ mod windows_tray {
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: hinstance,
-                hIcon: LoadIconW(std::ptr::null_mut(), IDI_APPLICATION),
+                hIcon: ghost_icon,
                 hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
                 hbrBackground: std::ptr::null_mut(),
                 lpszMenuName: std::ptr::null(),
                 lpszClassName: class_name.as_ptr(),
-                hIconSm: LoadIconW(std::ptr::null_mut(), IDI_APPLICATION),
+                hIconSm: ghost_icon,
             };
 
             RegisterClassExW(&wnd_class);
@@ -123,16 +240,19 @@ mod windows_tray {
                 return Err(anyhow::anyhow!("Failed to create message window"));
             }
 
-            // Create Tray Icon
+            // Apply Immersive Dark Mode to window and menus
+            enable_dark_mode(hwnd);
+
+            // Create Tray Icon with customized Ghost icon
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;
             nid.uID = 1;
             nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             nid.uCallbackMessage = WM_TRAYICON;
-            nid.hIcon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+            nid.hIcon = ghost_icon;
 
-            let tip = to_wide_null("GhostLink: Starting...");
+            let tip = to_wide_null("GhostLink DPI Bypass");
             for (i, &ch) in tip.iter().take(127).enumerate() {
                 nid.szTip[i] = ch;
             }
@@ -237,41 +357,56 @@ mod windows_tray {
             return;
         }
 
-        // 1. GhostLink Engine Toggle
+        // 1. GhostLink Engine Toggle (Active / Inactive)
         let gl_label = if st.is_gl_running {
-            format!("👻 GhostLink: Active [{}] (Click to Stop)", st.active_strategy_name)
+            format!("●  GhostLink: ACTIVE [{}] (Click to Stop)", st.active_strategy_name)
         } else {
-            "👻 GhostLink: Inactive (Click to Start)".to_string()
+            "○  GhostLink: Inactive (Click to Start)".to_string()
         };
         let mut gl_flags = MF_STRING;
         if st.is_gl_running {
             gl_flags |= MF_CHECKED;
         }
         AppendMenuW(hmenu, gl_flags, ID_GHOSTLINK_TOGGLE, to_wide_null(&gl_label).as_ptr());
+        if st.is_gl_running {
+            CheckMenuItem(hmenu, ID_GHOSTLINK_TOGGLE as u32, MF_BYCOMMAND | MF_CHECKED);
+        }
 
-        // 2. WireGuard Toggle
-        let wg_label = format!(
-            "🌍 Full VPN (WireGuard): {} [{}]",
-            st.wireguard_tunnel_name,
-            if st.wireguard_connected { "Connected" } else { "Disconnected" }
-        );
+        // 2. WireGuard Toggle (Checked with checkmark if connected)
+        let wg_label = if st.wireguard_connected {
+            format!("✓  🌍 Full VPN (WireGuard): {} [Connected]", st.wireguard_tunnel_name)
+        } else {
+            format!("    🌍 Full VPN (WireGuard): {} [Disconnected]", st.wireguard_tunnel_name)
+        };
         let mut wg_flags = MF_STRING;
         if st.wireguard_connected {
             wg_flags |= MF_CHECKED;
         }
         AppendMenuW(hmenu, wg_flags, ID_WIREGUARD_TOGGLE, to_wide_null(&wg_label).as_ptr());
+        if st.wireguard_connected {
+            CheckMenuItem(hmenu, ID_WIREGUARD_TOGGLE as u32, MF_BYCOMMAND | MF_CHECKED);
+        }
 
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
-        // 3. Strategy Submenu
+        // 3. Strategy Submenu (Checked on active strategy)
         let hstrat_menu = CreatePopupMenu();
         for (idx, strat) in st.strategies.iter().enumerate() {
+            let is_active = strat.id == st.active_strategy_id;
+            let label = if is_active {
+                format!("✓  {} ({})", strat.name, strat.id)
+            } else {
+                format!("    {} ({})", strat.name, strat.id)
+            };
             let mut s_flags = MF_STRING;
-            if strat.id == st.active_strategy_id {
+            if is_active {
                 s_flags |= MF_CHECKED;
             }
-            let label = format!("{} ({})", strat.name, strat.id);
-            AppendMenuW(hstrat_menu, s_flags, ID_STRATEGY_BASE + idx, to_wide_null(&label).as_ptr());
+            let item_id = ID_STRATEGY_BASE + idx;
+            AppendMenuW(hstrat_menu, s_flags, item_id, to_wide_null(&label).as_ptr());
+            if is_active {
+                CheckMenuItem(hstrat_menu, item_id as u32, MF_BYCOMMAND | MF_CHECKED);
+            }
         }
         let strat_header = format!("⚡ Strategy: {}", st.active_strategy_name);
         AppendMenuW(hmenu, MF_POPUP, hstrat_menu as usize, to_wide_null(&strat_header).as_ptr());
@@ -285,11 +420,19 @@ mod windows_tray {
         AppendMenuW(hmenu, MF_STRING, ID_TEST_CONNECTION, to_wide_null("📊 Test Connection (YouTube / Discord / WikiLeaks)").as_ptr());
 
         // 6. Start at Login
+        let auto_label = if st.autostart_enabled {
+            "✓  🚀 Start at Login".to_string()
+        } else {
+            "    🚀 Start at Login".to_string()
+        };
         let mut auto_flags = MF_STRING;
         if st.autostart_enabled {
             auto_flags |= MF_CHECKED;
         }
-        AppendMenuW(hmenu, auto_flags, ID_AUTOSTART_TOGGLE, to_wide_null("🚀 Start at Login").as_ptr());
+        AppendMenuW(hmenu, auto_flags, ID_AUTOSTART_TOGGLE, to_wide_null(&auto_label).as_ptr());
+        if st.autostart_enabled {
+            CheckMenuItem(hmenu, ID_AUTOSTART_TOGGLE as u32, MF_BYCOMMAND | MF_CHECKED);
+        }
 
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
