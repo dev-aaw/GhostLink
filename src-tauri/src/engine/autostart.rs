@@ -1,15 +1,14 @@
 use anyhow::Result;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 pub struct AutoStartManager;
 
 impl AutoStartManager {
     #[cfg(target_os = "macos")]
-    pub fn plist_path() -> PathBuf {
+    pub fn plist_path() -> std::path::PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
+        std::path::PathBuf::from(home)
             .join("Library")
             .join("LaunchAgents")
             .join("com.ghostlink.menubar.plist")
@@ -41,7 +40,7 @@ impl AutoStartManager {
         {
             let plist_path = Self::plist_path();
             if let Some(parent) = plist_path.parent() {
-                fs::create_dir_all(parent)?;
+                std::fs::create_dir_all(parent)?;
             }
 
             let plist_content = format!(
@@ -66,7 +65,7 @@ impl AutoStartManager {
                 app_executable_path.to_string_lossy()
             );
 
-            fs::write(&plist_path, plist_content)?;
+            std::fs::write(&plist_path, plist_content)?;
             let _ = Command::new("launchctl")
                 .args(["load", "-w", &plist_path.to_string_lossy()])
                 .status();
@@ -95,7 +94,7 @@ impl AutoStartManager {
                 let _ = Command::new("launchctl")
                     .args(["unload", "-w", &plist_path.to_string_lossy()])
                     .status();
-                let _ = fs::remove_file(&plist_path);
+                let _ = std::fs::remove_file(&plist_path);
             }
             Ok(())
         }

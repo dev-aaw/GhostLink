@@ -1,8 +1,11 @@
 use anyhow::{anyhow, Result};
 use ghostlink_engine::engine::ipc::{
-    DaemonStatusInfo, IpcRequest, IpcResponse, DEFAULT_SOCKET_PATH, FALLBACK_SOCKET_PATH, WINDOWS_IPC_ADDR,
+    DaemonStatusInfo, IpcRequest, IpcResponse, WINDOWS_IPC_ADDR,
 };
+#[cfg(unix)]
+use ghostlink_engine::engine::ipc::{DEFAULT_SOCKET_PATH, FALLBACK_SOCKET_PATH};
 use ghostlink_engine::{EngineConfig, EngineState, ProbeRunner, Strategy, UnblockEngine};
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;

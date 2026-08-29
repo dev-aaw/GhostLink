@@ -113,6 +113,7 @@ impl BinaryManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn download_macos_tpws(&self) -> Result<()> {
         let target_path = self.get_executable_path();
         println!("⬇️  Downloading official zapret release ({}) for macOS from {}...", ZAPRET_VERSION, ZAPRET_MACOS_ZIP_URL);

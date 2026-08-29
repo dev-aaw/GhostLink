@@ -1,6 +1,5 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WireGuardState {
@@ -25,7 +24,7 @@ impl WireGuardManager {
     pub fn list_tunnels() -> Vec<WireGuardTunnelInfo> {
         #[cfg(target_os = "macos")]
         {
-            let output = Command::new("scutil")
+            let output = std::process::Command::new("scutil")
                 .args(["--nc", "list"])
                 .output();
 
@@ -71,7 +70,7 @@ impl WireGuardManager {
     pub fn status(tunnel_name: &str) -> WireGuardState {
         #[cfg(target_os = "macos")]
         {
-            let output = Command::new("scutil")
+            let output = std::process::Command::new("scutil")
                 .args(["--nc", "status", tunnel_name])
                 .output();
 
@@ -91,6 +90,7 @@ impl WireGuardManager {
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = tunnel_name;
             WireGuardState::Disconnected
         }
     }
@@ -99,7 +99,8 @@ impl WireGuardManager {
     pub fn connect(tunnel_name: &str) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            let status = Command::new("scutil")
+            use anyhow::Context;
+            let status = std::process::Command::new("scutil")
                 .args(["--nc", "start", tunnel_name])
                 .status()
                 .with_context(|| format!("Failed to start WireGuard tunnel '{}'", tunnel_name))?;
@@ -111,6 +112,7 @@ impl WireGuardManager {
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = tunnel_name;
             Err(anyhow!("WireGuard management only implemented for macOS"))
         }
     }
@@ -119,7 +121,8 @@ impl WireGuardManager {
     pub fn disconnect(tunnel_name: &str) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            let status = Command::new("scutil")
+            use anyhow::Context;
+            let status = std::process::Command::new("scutil")
                 .args(["--nc", "stop", tunnel_name])
                 .status()
                 .with_context(|| format!("Failed to stop WireGuard tunnel '{}'", tunnel_name))?;
@@ -131,6 +134,7 @@ impl WireGuardManager {
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = tunnel_name;
             Err(anyhow!("WireGuard management only implemented for macOS"))
         }
     }

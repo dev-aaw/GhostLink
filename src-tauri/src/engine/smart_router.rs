@@ -73,6 +73,10 @@ impl SmartRouter {
                 return Some((i, r));
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = tunnel_name;
+        }
         None
     }
 

@@ -1,4 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 pub struct SystemProxyManager {

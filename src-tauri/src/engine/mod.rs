@@ -13,7 +13,6 @@ pub mod wireguard;
 pub mod service;
 
 use anyhow::{anyhow, Result};
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,10 +46,7 @@ pub struct UnblockEngine {
 
 impl UnblockEngine {
     pub fn new(config: EngineConfig) -> Self {
-        let base_dir = config
-            .base_dir
-            .clone()
-            .unwrap_or_else(|| dirs_fallback());
+        let base_dir = config.base_dir.clone();
 
         let binary_mgr = BinaryManager::new(&base_dir);
         let strategy_mgr = StrategyManager::new(&base_dir);
@@ -71,6 +67,10 @@ impl UnblockEngine {
         }
     }
 
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
     pub fn state(&self) -> &EngineState {
         &self.state
     }
@@ -88,7 +88,7 @@ impl UnblockEngine {
     pub async fn prepare(&self) -> Result<()> {
         self.binary_mgr.ensure_binaries().await?;
         self.payload_mgr.ensure_payloads()?;
-        self.strategy_mgr.ensure_lists().await?;
+        self.strategy_mgr.ensure_lists()?;
         Ok(())
     }
 
@@ -143,7 +143,7 @@ impl UnblockEngine {
 
         #[cfg(target_os = "windows")]
         {
-            if let Some(ref p) = self.active_process {
+            if let Some(ref mut p) = self.active_process {
                 if !p.is_alive() {
                     let _ = self.stop().await;
                     return Err(anyhow!("winws.exe process failed to launch or crashed on startup"));
@@ -306,11 +306,4 @@ impl UnblockEngine {
 
         Ok(best.map(|(s, _)| s))
     }
-}
-
-fn dirs_fallback() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".ghostlink")
 }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rand::RngCore;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Generate fake QUIC initial packet (standard QUIC Initial packet for google.com).
 /// Matches Flowseal's quic_initial_www_google_com.bin.
@@ -148,4 +148,27 @@ pub fn ensure_payload_files(dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub struct PayloadManager {
+    payloads_dir: PathBuf,
+}
+
+impl PayloadManager {
+    pub fn new(base_dir: &Path) -> Self {
+        let platform_sub = if cfg!(target_os = "macos") {
+            "darwin"
+        } else if cfg!(target_os = "windows") {
+            "win32"
+        } else {
+            "linux"
+        };
+        Self {
+            payloads_dir: base_dir.join("bin").join(platform_sub),
+        }
+    }
+
+    pub fn ensure_payloads(&self) -> Result<()> {
+        ensure_payload_files(&self.payloads_dir)
+    }
 }
