@@ -109,8 +109,6 @@ fast.com
 turktelekom.com.tr
 turkcell.com.tr
 vodafone.com.tr
-wikileaks.org
-www.wikileaks.org
 "#;
             fs::write(exclude_list, content)?;
         }
@@ -123,6 +121,8 @@ www.wikileaks.org
 8.8.4.4
 9.9.9.9
 149.112.112.112
+80.81.248.21
+51.159.197.136
 "#;
             fs::write(ipset_all, content)?;
         }
@@ -364,7 +364,7 @@ www.wikileaks.org
                 "--new".to_string(),
             ]);
 
-            // Rule 7: IP-set TCP Fallback
+            // Rule 7: IP-set TCP Fallback (cutoff=n2: only desync first 2 segments, leave TLS renegotiation untouched)
             args.extend([
                 "--filter-tcp=80,443,8443".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
@@ -372,6 +372,7 @@ www.wikileaks.org
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
             ]);
             args.extend(r7);
+            args.push("--dpi-desync-cutoff=n2".to_string());
             args.push("--new".to_string());
 
             // Rule 8: UDP Game / Catch-All

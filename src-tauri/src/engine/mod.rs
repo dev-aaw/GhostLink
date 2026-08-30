@@ -100,13 +100,6 @@ impl UnblockEngine {
         self.payload_mgr.ensure_payloads()?;
         self.strategy_mgr.ensure_lists()?;
 
-        #[cfg(target_os = "windows")]
-        {
-            let _ = silent_command("taskkill.exe")
-                .args(["/F", "/IM", "winws.exe"])
-                .status();
-        }
-
         Ok(())
     }
 
@@ -326,6 +319,15 @@ impl UnblockEngine {
     where
         F: FnMut(usize, usize, &Strategy, Option<&ProbeSummary>),
     {
+        // Pause watchdog during auto-tune to prevent false restarts while we kill/spawn winws per strategy
+        let was_watchdog_active = self.watchdog_running.load(std::sync::atomic::Ordering::SeqCst);
+        if was_watchdog_active {
+            self.watchdog_running.store(false, std::sync::atomic::Ordering::SeqCst);
+            // Give the watchdog loop time to notice the flag and exit
+            sleep(Duration::from_millis(200)).await;
+            println!("⏸️ [AutoTune] Watchdog paused during strategy benchmarking.");
+        }
+
         let strategies = self.list_strategies();
         let total = strategies.len();
         let mut best: Option<(Strategy, ProbeSummary)> = None;
@@ -353,6 +355,7 @@ impl UnblockEngine {
             }
         }
 
+        // Note: watchdog will be re-armed when the caller invokes start() with the winning strategy
         Ok(best.map(|(s, _)| s))
     }
 }
