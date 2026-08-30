@@ -17,125 +17,54 @@ impl StrategyManager {
     pub fn ensure_lists(&self) -> Result<()> {
         fs::create_dir_all(&self.lists_dir)?;
 
-        let general_list = self.lists_dir.join("list-general.txt");
-        if !general_list.exists() {
-            let content = r#"googlevideo.com
-youtube.com
-youtubekids.com
-ytimg.com
-youtu.be
-youtubei.googleapis.com
-yt4.ggpht.com
-yt3.ggpht.com
-yt2.ggpht.com
-yt1.ggpht.com
-gvt1.com
-video.google.com
-play.google.com
-wide-youtube.l.google.com
-redirector.googlevideo.com
-jnn-pa.googleapis.com
-discord.com
-discord.gg
-discordapp.com
-discordapp.net
-discord.media
-discordcdn.com
-gateway.discord.gg
-cdn.discordapp.com
-media.discordapp.net
-status.discord.com
-latency.discord.media
-instagram.com
-cdninstagram.com
-fbcdn.net
-twitter.com
-x.com
-t.co
-twimg.com
-"#;
-            fs::write(general_list, content)?;
-        }
+        let write_list = |filename: &str, content: &str| -> Result<()> {
+            let path = self.lists_dir.join(filename);
+            fs::write(path, content)?;
+            Ok(())
+        };
 
-        let google_list = self.lists_dir.join("list-google.txt");
-        if !google_list.exists() {
-            let content = r#"googlevideo.com
-youtube.com
-youtubekids.com
-ytimg.com
-youtu.be
-youtubei.googleapis.com
-yt4.ggpht.com
-yt3.ggpht.com
-yt2.ggpht.com
-yt1.ggpht.com
-gvt1.com
-video.google.com
-play.google.com
-wide-youtube.l.google.com
-redirector.googlevideo.com
-jnn-pa.googleapis.com
-"#;
-            fs::write(google_list, content)?;
-        }
+        // 1. Google / YouTube
+        write_list(
+            "list-google.txt",
+            "googlevideo.com\nyoutube.com\nyoutubekids.com\nytimg.com\nyoutu.be\nyoutubei.googleapis.com\nyt4.ggpht.com\nyt3.ggpht.com\nyt2.ggpht.com\nyt1.ggpht.com\ngvt1.com\nvideo.google.com\nplay.google.com\nwide-youtube.l.google.com\nredirector.googlevideo.com\njnn-pa.googleapis.com\n",
+        )?;
 
-        let discord_list = self.lists_dir.join("list-discord.txt");
-        if !discord_list.exists() {
-            let content = r#"discord.com
-discord.gg
-discordapp.com
-discordapp.net
-discord.media
-discordcdn.com
-gateway.discord.gg
-cdn.discordapp.com
-media.discordapp.net
-status.discord.com
-latency.discord.media
-"#;
-            fs::write(discord_list, content)?;
-        }
+        // 2. Discord (Web, App, Gateway, CDN)
+        write_list(
+            "list-discord.txt",
+            "discord.com\ndiscord.gg\ndiscordapp.com\ndiscordapp.net\ndiscord.media\ndiscordcdn.com\ngateway.discord.gg\ncdn.discordapp.com\nmedia.discordapp.net\nstatus.discord.com\nlatency.discord.media\n",
+        )?;
 
-        let exclude_list = self.lists_dir.join("list-exclude.txt");
-        if !exclude_list.exists() {
-            let content = r#"127.0.0.1
-localhost
-::1
-router.asus.com
-tplinkwifi.net
-my.router
-speedtest.net
-fast.com
-turktelekom.com.tr
-turkcell.com.tr
-vodafone.com.tr
-"#;
-            fs::write(exclude_list, content)?;
-        }
+        // 3. Sensitive / Strict TLS Handshake Sites (WikiLeaks etc.)
+        // These servers fail with fake SNI pattern overlap; they need clean TCP split
+        write_list(
+            "list-sensitive.txt",
+            "wikileaks.org\nwww.wikileaks.org\n",
+        )?;
 
-        let ipset_all = self.lists_dir.join("ipset-all.txt");
-        if !ipset_all.exists() {
-            let content = r#"1.1.1.1
-1.0.0.1
-8.8.8.8
-8.8.4.4
-9.9.9.9
-149.112.112.112
-80.81.248.21
-51.159.197.136
-"#;
-            fs::write(ipset_all, content)?;
-        }
+        // 4. General Blocked Domains (Social Media, etc.)
+        write_list(
+            "list-general.txt",
+            "instagram.com\ncdninstagram.com\nfbcdn.net\ntwitter.com\nx.com\nt.co\ntwimg.com\n",
+        )?;
 
-        let ipset_exclude = self.lists_dir.join("ipset-exclude.txt");
-        if !ipset_exclude.exists() {
-            let content = r#"10.0.0.0/8
-172.16.0.0/12
-192.168.0.0/16
-127.0.0.0/8
-"#;
-            fs::write(ipset_exclude, content)?;
-        }
+        // 5. Exclude Domains (Routers, Speedtest, ISP Portals)
+        write_list(
+            "list-exclude.txt",
+            "127.0.0.1\nlocalhost\n::1\nrouter.asus.com\ntplinkwifi.net\nmy.router\nspeedtest.net\nfast.com\nturktelekom.com.tr\nturkcell.com.tr\nvodafone.com.tr\n",
+        )?;
+
+        // 6. IP-set All (DNS Providers only - never put CDN ranges here)
+        write_list(
+            "ipset-all.txt",
+            "1.1.1.1\n1.0.0.1\n8.8.8.8\n8.8.4.4\n9.9.9.9\n149.112.112.112\n",
+        )?;
+
+        // 7. IP-set Exclude (Private LAN)
+        write_list(
+            "ipset-exclude.txt",
+            "10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16\n127.0.0.0/8\n",
+        )?;
 
         Ok(())
     }
@@ -298,15 +227,13 @@ vodafone.com.tr
             "--wf-udp=443,19294-19344,50000-50100".to_string(),
         ];
 
-        // Flowseal standard 8-rule builder matching official release batch files exactly
-        let build_windows_flowseal_rules = |r3: Vec<String>, r4: Vec<String>, r5: Vec<String>, r7: Vec<String>, r8: Vec<String>| -> Vec<String> {
+        // Flowseal standard multi-rule builder with isolated domain & protocol handling
+        let build_windows_flowseal_rules = |r3: Vec<String>, r4: Vec<String>, r5_discord: Vec<String>, r7_general: Vec<String>, r8_ipset: Vec<String>, r9_udp: Vec<String>| -> Vec<String> {
             let mut args = wf_full.clone();
-            // Rule 1: UDP 443 QUIC
+            // Rule 1: UDP 443 QUIC (Google / YouTube)
             args.extend([
                 "--filter-udp=443".to_string(),
-                format!("--hostlist={}", l("list-general.txt")),
-                format!("--hostlist-exclude={}", l("list-exclude.txt")),
-                format!("--ipset-exclude={}", l("ipset-exclude.txt")),
+                format!("--hostlist={}", l("list-google.txt")),
                 "--dpi-desync=fake".to_string(),
                 "--dpi-desync-repeats=6".to_string(),
                 format!("--dpi-desync-fake-quic={}", quic_g),
@@ -341,41 +268,47 @@ vodafone.com.tr
             args.extend(r4);
             args.push("--new".to_string());
 
-            // Rule 5: General TCP (Discord Web, WikiLeaks, X, etc.)
+            // Rule 5: Discord Web / App / CDN TCP 80,443 (Dedicated Discord Rule)
+            args.extend([
+                "--filter-tcp=80,443".to_string(),
+                format!("--hostlist={}", l("list-discord.txt")),
+            ]);
+            args.extend(r5_discord);
+            args.push("--new".to_string());
+
+            // Rule 6: Sensitive / Strict TLS Handshake Sites (WikiLeaks etc.)
+            // Multisplit 681 with Google ClientHello pattern at split-pos=1
+            args.extend([
+                "--filter-tcp=80,443".to_string(),
+                format!("--hostlist={}", l("list-sensitive.txt")),
+                "--dpi-desync=multisplit".to_string(),
+                "--dpi-desync-split-seqovl=681".to_string(),
+                "--dpi-desync-split-pos=1".to_string(),
+                format!("--dpi-desync-split-seqovl-pattern={}", tls_g),
+                "--new".to_string(),
+            ]);
+
+            // Rule 7: General Blocked TCP (Instagram, Twitter/X, etc.)
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-general.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
             ]);
-            args.extend(r5);
+            args.extend(r7_general);
             args.push("--new".to_string());
 
-            // Rule 6: IP-set UDP Fallback
-            args.extend([
-                "--filter-udp=443".to_string(),
-                format!("--ipset={}", l("ipset-all.txt")),
-                format!("--hostlist-exclude={}", l("list-exclude.txt")),
-                format!("--ipset-exclude={}", l("ipset-exclude.txt")),
-                "--dpi-desync=fake".to_string(),
-                "--dpi-desync-repeats=6".to_string(),
-                format!("--dpi-desync-fake-quic={}", quic_g),
-                "--dpi-desync-cutoff=d2".to_string(),
-                "--new".to_string(),
-            ]);
-
-            // Rule 7: IP-set TCP Fallback (cutoff=n2: only desync first 2 segments, leave TLS renegotiation untouched)
+            // Rule 8: IP-set TCP Fallback
             args.extend([
                 "--filter-tcp=80,443,8443".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
             ]);
-            args.extend(r7);
-            args.push("--dpi-desync-cutoff=n2".to_string());
+            args.extend(r8_ipset);
             args.push("--new".to_string());
 
-            // Rule 8: UDP Game / Catch-All
+            // Rule 9: UDP Game / Catch-All
             args.extend([
                 "--filter-udp=12".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
@@ -386,7 +319,7 @@ vodafone.com.tr
                 format!("--dpi-desync-fake-unknown-udp={}", quic_d),
                 "--dpi-desync-cutoff=d2".to_string(),
             ]);
-            args.extend(r8);
+            args.extend(r9_udp);
 
             args
         };
@@ -398,10 +331,11 @@ vodafone.com.tr
                 description: "Official Flowseal multisplit 681/568 with ClientHello pattern matching. Zero connection resets, fully tested across ISPs.".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
                     vec!["--dpi-desync-cutoff=n2".into()],
                 ),
             },
@@ -413,6 +347,7 @@ vodafone.com.tr
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=568".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=568".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=568".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
                     vec!["--dpi-desync-cutoff=n2".into()],
@@ -427,6 +362,7 @@ vodafone.com.tr
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com".into()],
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com".into()],
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
                     vec!["--dpi-desync-cutoff=n2".into()],
                 ),
@@ -437,6 +373,7 @@ vodafone.com.tr
                 description: "Multi-split at position 2 and SNI extension + 1 with 679 byte pattern overlap.".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
@@ -454,6 +391,7 @@ vodafone.com.tr
                     vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru".into(), "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru".into(), "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru".into(), "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync-cutoff=n4".into()],
                 ),
             },
@@ -465,6 +403,7 @@ vodafone.com.tr
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
                     vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_4)],
                     vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_4)],
                     vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_4)],
                     vec!["--dpi-desync-cutoff=n3".into()],
@@ -532,7 +471,7 @@ impl StrategyConfigManager {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            "strategy-1".to_string()
+            "mac-alt9".to_string()
         }
     }
 }
