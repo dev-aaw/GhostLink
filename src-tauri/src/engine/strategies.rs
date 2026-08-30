@@ -218,6 +218,7 @@ impl StrategyManager {
 
         let tls_g = q("tls_clienthello_www_google_com.bin");
         let tls_4 = q("tls_clienthello_4pda_to.bin");
+        let tls_m = q("tls_clienthello_max_ru.bin");
         let quic_g = q("quic_initial_www_google_com.bin");
         let quic_d = q("quic_initial_dbankcloud_ru.bin");
         let stun = q("stun.bin");
@@ -251,12 +252,15 @@ impl StrategyManager {
                 "--dpi-desync-cutoff=d3".to_string(),
                 "--new".to_string(),
             ]);
-            // Rule 3: Discord Media TCP (pure split-pos=1, zero fake payload)
+            // Rule 3: Discord Media TCP (macOS ALT9 equivalent: 681B google pattern + TS fooling)
             args.extend([
                 "--filter-tcp=2053,2083,2087,2096,8443".to_string(),
                 "--hostlist-domains=discord.media".to_string(),
-                "--dpi-desync=split".to_string(),
+                "--dpi-desync=multisplit".to_string(),
                 "--dpi-desync-split-pos=1".to_string(),
+                "--dpi-desync-split-seqovl=681".to_string(),
+                format!("--dpi-desync-split-seqovl-pattern={}", tls_g),
+                "--dpi-desync-fooling=ts".to_string(),
                 "--new".to_string(),
             ]);
 
@@ -269,12 +273,15 @@ impl StrategyManager {
             args.extend(r4_google);
             args.push("--new".to_string());
 
-            // Rule 5: Discord Web / App / Gateway / CDN TCP 80,443 (pure split-pos=1, zero fake payload)
+            // Rule 5: Discord Web / App / Gateway / CDN TCP 80,443 (macOS ALT9 equivalent: 681B google pattern + TS fooling)
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-discord.txt")),
-                "--dpi-desync=split".to_string(),
+                "--dpi-desync=multisplit".to_string(),
                 "--dpi-desync-split-pos=1".to_string(),
+                "--dpi-desync-split-seqovl=681".to_string(),
+                format!("--dpi-desync-split-seqovl-pattern={}", tls_g),
+                "--dpi-desync-fooling=ts".to_string(),
                 "--new".to_string(),
             ]);
 
@@ -328,12 +335,12 @@ impl StrategyManager {
             Strategy {
                 id: "win-general".to_string(),
                 name: "Windows General (Flowseal Default - Recommended)".to_string(),
-                description: "Official Flowseal multisplit 681/568 with ClientHello pattern matching. Zero connection resets, fully tested across ISPs.".to_string(),
+                description: "Official Flowseal multisplit 681/568 with ClientHello pattern matching and TS fooling. Zero connection resets, fully tested across ISPs.".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync-cutoff=n2".into()],
                 ),
             },
