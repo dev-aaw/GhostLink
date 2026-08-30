@@ -53,8 +53,6 @@ twitter.com
 x.com
 t.co
 twimg.com
-wikileaks.org
-www.wikileaks.org
 "#;
             fs::write(general_list, content)?;
         }
@@ -111,6 +109,8 @@ fast.com
 turktelekom.com.tr
 turkcell.com.tr
 vodafone.com.tr
+wikileaks.org
+www.wikileaks.org
 "#;
             fs::write(exclude_list, content)?;
         }
