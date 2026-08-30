@@ -467,3 +467,67 @@ vodafone.com.tr
         ]
     }
 }
+
+pub struct StrategyConfigManager;
+
+impl StrategyConfigManager {
+    /// List of paths to check for persistent strategy config (User home and ProgramData)
+    pub fn config_paths() -> Vec<std::path::PathBuf> {
+        let mut paths = Vec::new();
+
+        // 1. User Home ~/.ghostlink/selected_strategy.txt
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".to_string());
+        paths.push(std::path::PathBuf::from(home).join(".ghostlink").join("selected_strategy.txt"));
+
+        // 2. Windows shared ProgramData
+        #[cfg(target_os = "windows")]
+        {
+            let pdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+            paths.push(std::path::PathBuf::from(pdata).join("GhostLink").join("selected_strategy.txt"));
+        }
+
+        paths
+    }
+
+    /// Save the selected strategy ID persistently
+    pub fn save_selected_strategy(strategy_id: &str) -> Result<()> {
+        let trimmed = strategy_id.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+
+        for path in Self::config_paths() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, trimmed);
+        }
+
+        Ok(())
+    }
+
+    /// Load the selected strategy ID, or return platform default
+    pub fn load_selected_strategy() -> String {
+        for path in Self::config_paths() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+
+        // Platform default if never saved
+        #[cfg(target_os = "windows")]
+        {
+            "win-general".to_string()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            "strategy-1".to_string()
+        }
+    }
+}
+

@@ -25,7 +25,7 @@ pub use payloads::PayloadManager;
 pub use probes::ProbeRunner;
 pub use process::ProcessHandle;
 pub use smart_router::SmartRouter;
-pub use strategies::StrategyManager;
+pub use strategies::{StrategyManager, StrategyConfigManager};
 pub use system_proxy::SystemProxyManager;
 pub use types::{EngineConfig, EngineState, Platform, ProbeResult, ProbeSummary, Strategy};
 pub use wireguard::{WireGuardManager, WireGuardState};

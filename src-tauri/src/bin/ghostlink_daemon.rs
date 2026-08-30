@@ -173,10 +173,12 @@ async fn main() -> Result<()> {
         // 2. Automatically launch DPI Bypass Engine on daemon boot (zero delay on PC startup)
         let state_for_autostart = Arc::clone(&state);
         tokio::spawn(async move {
+            let saved_id = ghostlink_engine::StrategyConfigManager::load_selected_strategy();
             let target_strat = {
                 let st = state_for_autostart.lock().await;
                 let strats = st.engine.list_strategies();
-                strats.iter().find(|s| s.id == "win-alt9")
+                strats.iter().find(|s| s.id == saved_id)
+                    .or_else(|| strats.iter().find(|s| s.id == "win-general"))
                     .or_else(|| strats.first())
                     .cloned()
             };
@@ -187,8 +189,9 @@ async fn main() -> Result<()> {
                 if let Err(e) = st.engine.start(&strat).await {
                     eprintln!("⚠️ [AutoStart] Failed to auto-start engine on boot: {}", e);
                 } else {
-                    st.active_strategy = Some(strat);
-                    println!("✨ [AutoStart] Engine is ACTIVE on boot with clean DNS and winws desync.");
+                    st.active_strategy = Some(strat.clone());
+                    let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&strat.id);
+                    println!("✨ [AutoStart] Engine is ACTIVE on boot with strategy [{}] (clean DNS and winws desync).", strat.name);
                 }
             }
         });
@@ -355,6 +358,7 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
 
             match target_strat {
                 Some(strat) => {
+                    let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&strat.id);
                     match st.engine.start(&strat).await {
                         Ok(()) => {
                             st.active_strategy = Some(strat.clone());

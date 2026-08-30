@@ -9,7 +9,7 @@ pub use engine::{
     probes::ProbeRunner,
     service::ServiceManager,
     smart_router::{SmartRouteEntry, SmartRouter},
-    strategies::StrategyManager,
+    strategies::{StrategyManager, StrategyConfigManager},
     types::{EngineConfig, EngineState, Platform, ProbeResult, ProbeRule, ProbeSummary, ProbeTier, Strategy},
     wireguard::{WireGuardManager, WireGuardState, WireGuardTunnelInfo},
     silent_command,

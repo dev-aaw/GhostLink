@@ -176,12 +176,16 @@ mod windows_tray {
         let engine = UnblockEngine::new(EngineConfig::default());
         let strategies = engine.list_strategies();
 
-        let default_strat_id = strategies.first().map(|s| s.id.clone()).unwrap_or_else(|| "win-general".to_string());
-        let default_strat_name = strategies.first().map(|s| s.name.clone()).unwrap_or_else(|| "Windows General".to_string());
+        let saved_strat_id = ghostlink_engine::StrategyConfigManager::load_selected_strategy();
+        let default_strat = strategies.iter().find(|s| s.id == saved_strat_id)
+            .or_else(|| strategies.iter().find(|s| s.id == "win-general"))
+            .or_else(|| strategies.first());
+        let default_strat_id = default_strat.map(|s| s.id.clone()).unwrap_or_else(|| "win-general".to_string());
+        let default_strat_name = default_strat.map(|s| s.name.clone()).unwrap_or_else(|| "Windows General (Flowseal Default - Recommended)".to_string());
         let detected_wg = detect_primary_wg_tunnel();
 
         let initial_wg_state = WireGuardManager::status(&detected_wg) == WireGuardState::Connected;
-        println!("🚀 [Init] WireGuard Tunnel Detected: '{}' | Live Connected: {}", detected_wg, initial_wg_state);
+        println!("🚀 [Init] Strategy: '{}' | WireGuard Tunnel: '{}' (Connected: {})", default_strat_name, detected_wg, initial_wg_state);
 
         let state = Arc::new(Mutex::new(TrayState {
             is_gl_running: false,
@@ -633,6 +637,7 @@ mod windows_tray {
                                     );
                                     let client_guard = GLOBAL_CLIENT.lock().unwrap();
                                     if let Some(client) = client_guard.as_ref() {
+                                        let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&best.id);
                                         let _ = client.start(&best.id, None, true).await;
                                     }
                                 }
@@ -701,6 +706,7 @@ mod windows_tray {
                         let client_guard = GLOBAL_CLIENT.lock().unwrap();
                         if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
                             rt.block_on(async {
+                                let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&strat.id);
                                 let _ = client.start(&strat.id, None, true).await;
                                 println!("⚡ [Strategy Switch] Switched to: {}", strat.name);
                                 notify("GhostLink", &format!("Strategy switched to: {}", strat.name));
