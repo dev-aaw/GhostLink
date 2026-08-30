@@ -99,6 +99,14 @@ impl UnblockEngine {
         self.binary_mgr.ensure_binaries().await?;
         self.payload_mgr.ensure_payloads()?;
         self.strategy_mgr.ensure_lists()?;
+
+        #[cfg(target_os = "windows")]
+        {
+            let _ = silent_command("taskkill.exe")
+                .args(["/F", "/IM", "winws.exe"])
+                .status();
+        }
+
         Ok(())
     }
 

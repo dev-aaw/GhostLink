@@ -4,6 +4,8 @@ use std::process::{Child, Command, Stdio};
 
 pub struct ProcessHandle {
     child: Child,
+    #[cfg(target_os = "windows")]
+    _job_handle: Option<isize>,
     pub binary_path: std::path::PathBuf,
     pub args: Vec<String>,
 }
@@ -60,8 +62,57 @@ impl ProcessHandle {
         let child = cmd.spawn()
             .with_context(|| format!("Failed to spawn process {:?}", exe_path))?;
 
+        #[cfg(target_os = "windows")]
+        let job_handle = unsafe {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::*;
+            use windows_sys::Win32::System::JobObjects::*;
+            use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+
+            type FnCreateJobObjectW = unsafe extern "system" fn(*const std::ffi::c_void, *const u16) -> HANDLE;
+            type FnSetInformationJobObject = unsafe extern "system" fn(HANDLE, u32, *const std::ffi::c_void, u32) -> BOOL;
+            type FnAssignProcessToJobObject = unsafe extern "system" fn(HANDLE, HANDLE) -> BOOL;
+
+            let k32_name: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+            let kernel32 = GetModuleHandleW(k32_name.as_ptr());
+            if !kernel32.is_null() {
+                if let (Some(p_create), Some(p_set), Some(p_assign)) = (
+                    GetProcAddress(kernel32, b"CreateJobObjectW\0".as_ptr()),
+                    GetProcAddress(kernel32, b"SetInformationJobObject\0".as_ptr()),
+                    GetProcAddress(kernel32, b"AssignProcessToJobObject\0".as_ptr()),
+                ) {
+                    let create_job: FnCreateJobObjectW = std::mem::transmute(p_create);
+                    let set_info: FnSetInformationJobObject = std::mem::transmute(p_set);
+                    let assign_job: FnAssignProcessToJobObject = std::mem::transmute(p_assign);
+
+                    let job = create_job(std::ptr::null(), std::ptr::null());
+                    if !job.is_null() {
+                        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                        set_info(
+                            job,
+                            JobObjectExtendedLimitInformation as u32,
+                            &info as *const _ as *const _,
+                            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                        );
+                        let process_handle = child.as_raw_handle() as HANDLE;
+                        assign_job(job, process_handle);
+                        Some(job as isize)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
         Ok(Self {
             child,
+            #[cfg(target_os = "windows")]
+            _job_handle: job_handle,
             binary_path: exe_path.to_path_buf(),
             args: args.to_vec(),
         })
@@ -79,6 +130,12 @@ impl ProcessHandle {
     pub fn kill(&mut self) -> Result<()> {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        #[cfg(target_os = "windows")]
+        if let Some(job) = self._job_handle.take() {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(job as windows_sys::Win32::Foundation::HANDLE);
+            }
+        }
         Ok(())
     }
 }

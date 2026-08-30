@@ -204,11 +204,11 @@ impl ServiceManager {
                 return Err(anyhow!("schtasks.exe /Create failed with code {:?}", status.code()));
             }
 
-            // 2. Configure task power settings (allow running on batteries without stopping)
+            // 2. Configure task reliability settings: auto-restart on crash, no battery restrictions, no 72h limit
             let _ = silent_command("powershell.exe")
                 .args([
                     "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-                    "$t = Get-ScheduledTask -TaskName 'GhostLinkService' -ErrorAction SilentlyContinue; if ($t) { $t.Settings.DisallowStartIfOnBatteries = $false; $t.Settings.StopIfGoingOnBatteries = $false; $t.Settings.ExecutionTimeLimit = 'PT0S'; Set-ScheduledTask -InputObject $t -ErrorAction SilentlyContinue }"
+                    "$t = Get-ScheduledTask -TaskName 'GhostLinkService' -ErrorAction SilentlyContinue; if ($t) { $t.Settings.DisallowStartIfOnBatteries = $false; $t.Settings.StopIfGoingOnBatteries = $false; $t.Settings.ExecutionTimeLimit = 'PT0S'; $t.Settings.RestartCount = 999; $t.Settings.RestartInterval = 'PT1M'; $t.Settings.StartWhenAvailable = $true; Set-ScheduledTask -InputObject $t -ErrorAction SilentlyContinue }"
                 ])
                 .status();
 

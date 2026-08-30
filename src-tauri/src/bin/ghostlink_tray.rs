@@ -486,7 +486,20 @@ mod windows_tray {
                     let client_guard = GLOBAL_CLIENT.lock().unwrap();
                     if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
                         rt.block_on(async {
-                            let is_daemon_alive = client.is_daemon_alive().await;
+                            let mut is_daemon_alive = client.is_daemon_alive().await;
+                            if !is_daemon_alive {
+                                println!("   Daemon offline, attempting to wake GhostLinkService...");
+                                let _ = ghostlink_engine::silent_command("schtasks.exe")
+                                    .args(["/Run", "/TN", "GhostLinkService"])
+                                    .status();
+                                for _ in 0..6 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                    if client.is_daemon_alive().await {
+                                        is_daemon_alive = true;
+                                        break;
+                                    }
+                                }
+                            }
                             println!("\n👉 [User Click] GHOSTLINK TOGGLE | Daemon alive: {}", is_daemon_alive);
 
                             let is_currently_running = if is_daemon_alive {
