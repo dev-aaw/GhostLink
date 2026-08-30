@@ -39,11 +39,16 @@ schtasks /Create /TN GhostLinkService /TR "C:\ProgramData\GhostLink\bin\ghostlin
 echo [*] Servis guvenilirlik ayarlari yapilandiriliyor...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$t = Get-ScheduledTask -TaskName 'GhostLinkService'; $t.Settings.DisallowStartIfOnBatteries = $false; $t.Settings.StopIfGoingOnBatteries = $false; $t.Settings.ExecutionTimeLimit = 'PT0S'; $t.Settings.RestartCount = 999; $t.Settings.RestartInterval = 'PT1M'; $t.Settings.StartWhenAvailable = $true; Set-ScheduledTask -InputObject $t" >nul 2>&1
 
+echo [*] DNS ayarlari otomatik (DHCP) durumuna getiriliyor...
+powershell -NoProfile -Command "Get-DnsClientServerAddress -AddressFamily IPv4 | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ResetServerAddresses -ErrorAction SilentlyContinue }" >nul 2>&1
+netsh interface ipv4 set dnsservers name="Ethernet" source=dhcp >nul 2>&1
+netsh interface ipv4 set dnsservers name="Wi-Fi" source=dhcp >nul 2>&1
+ipconfig /flushdns >nul 2>&1
+
 echo [*] Varsayilan strateji [win-general] seciliyor...
 echo win-general> "C:\ProgramData\GhostLink\selected_strategy.txt"
 if not exist "%USERPROFILE%\.ghostlink" mkdir "%USERPROFILE%\.ghostlink"
 echo win-general> "%USERPROFILE%\.ghostlink\selected_strategy.txt"
-ipconfig /flushdns >nul 2>&1
 
 echo [*] GhostLink Servisi baslatiliyor...
 schtasks /Run /TN GhostLinkService

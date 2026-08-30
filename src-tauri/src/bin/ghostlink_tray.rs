@@ -47,6 +47,7 @@ mod windows_tray {
     static GLOBAL_HANDLE: Mutex<Option<tokio::runtime::Handle>> = Mutex::new(None);
     static GLOBAL_CLIENT: Mutex<Option<Arc<DaemonClient>>> = Mutex::new(None);
     static IS_RUNNING: AtomicBool = AtomicBool::new(true);
+    static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 
     fn detect_primary_wg_tunnel() -> String {
         let tunnels = WireGuardManager::list_tunnels();
@@ -353,57 +354,50 @@ mod windows_tray {
     }
 
     unsafe fn show_context_menu(hwnd: HWND) {
+        if MENU_OPEN.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
         let state_arc = match GLOBAL_STATE.lock().unwrap().clone() {
             Some(s) => s,
-            None => return,
+            None => {
+                MENU_OPEN.store(false, Ordering::SeqCst);
+                return;
+            }
         };
         let st = state_arc.lock().unwrap();
 
         let hmenu = CreatePopupMenu();
         if hmenu.is_null() {
+            MENU_OPEN.store(false, Ordering::SeqCst);
             return;
         }
 
-        // 1. GhostLink Engine Toggle
-        let gl_label = if st.is_gl_running {
-            format!("✓  GhostLink: Active [{}]", st.active_strategy_name)
+        // 1. GhostLink Engine Status Toggle
+        let status_label = if st.is_gl_running {
+            format!("🟢  GhostLink: AKTİF (Kapatmak için tıkla)")
         } else {
-            "GhostLink: Inactive (Click to Start)".to_string()
+            format!("⚪  GhostLink: KAPALI (Başlatmak için tıkla)")
         };
-        let mut gl_flags = MF_STRING;
+        let mut status_flags = MF_STRING;
         if st.is_gl_running {
-            gl_flags |= MF_CHECKED;
+            status_flags |= MF_CHECKED;
         }
-        AppendMenuW(hmenu, gl_flags, ID_GHOSTLINK_TOGGLE, to_wide_null(&gl_label).as_ptr());
+        AppendMenuW(hmenu, status_flags, ID_GHOSTLINK_TOGGLE, to_wide_null(&status_label).as_ptr());
         if st.is_gl_running {
             CheckMenuItem(hmenu, ID_GHOSTLINK_TOGGLE as u32, MF_BYCOMMAND | MF_CHECKED);
         }
 
-        // 2. WireGuard Toggle
-        let wg_label = if st.wireguard_connected {
-            format!("✓  Full VPN (WireGuard): {} [Connected]", st.wireguard_tunnel_name)
-        } else {
-            format!("Full VPN (WireGuard): {} [Disconnected]", st.wireguard_tunnel_name)
-        };
-        let mut wg_flags = MF_STRING;
-        if st.wireguard_connected {
-            wg_flags |= MF_CHECKED;
-        }
-        AppendMenuW(hmenu, wg_flags, ID_WIREGUARD_TOGGLE, to_wide_null(&wg_label).as_ptr());
-        if st.wireguard_connected {
-            CheckMenuItem(hmenu, ID_WIREGUARD_TOGGLE as u32, MF_BYCOMMAND | MF_CHECKED);
-        }
-
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
-        // 3. Strategy Submenu
+        // 2. Strategy Submenu (Checked active strategy)
         let hstrat_menu = CreatePopupMenu();
         for (idx, strat) in st.strategies.iter().enumerate() {
             let is_active = strat.id == st.active_strategy_id;
             let label = if is_active {
                 format!("✓  {} ({})", strat.name, strat.id)
             } else {
-                format!("{} ({})", strat.name, strat.id)
+                format!("    {} ({})", strat.name, strat.id)
             };
             let mut s_flags = MF_STRING;
             if is_active {
@@ -415,43 +409,63 @@ mod windows_tray {
                 CheckMenuItem(hstrat_menu, item_id as u32, MF_BYCOMMAND | MF_CHECKED);
             }
         }
-        let strat_header = format!("⚡ Strategy: {}", st.active_strategy_name);
+        let strat_header = format!("⚡ Strateji: {}", st.active_strategy_name);
         AppendMenuW(hmenu, MF_POPUP, hstrat_menu as usize, to_wide_null(&strat_header).as_ptr());
+
+        // 3. WireGuard VPN Toggle (if applicable)
+        let wg_label = if st.wireguard_connected {
+            format!("✓  Full VPN (WireGuard): {} [Bağlı]", st.wireguard_tunnel_name)
+        } else {
+            format!("    Full VPN (WireGuard): {} [Kapalı]", st.wireguard_tunnel_name)
+        };
+        let mut wg_flags = MF_STRING;
+        if st.wireguard_connected {
+            wg_flags |= MF_CHECKED;
+        }
+        AppendMenuW(hmenu, wg_flags, ID_WIREGUARD_TOGGLE, to_wide_null(&wg_label).as_ptr());
 
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
-        // 4. Run Auto-Tune
-        AppendMenuW(hmenu, MF_STRING, ID_AUTOTUNE, to_wide_null("🔄 Run Auto-Tune Benchmark").as_ptr());
+        // 4. Test Connection (Probe)
+        AppendMenuW(hmenu, MF_STRING, ID_TEST_CONNECTION, to_wide_null("📊 Bağlantı Testi (Discord / YouTube / WikiLeaks)").as_ptr());
 
-        // 5. Test Connection (Probe)
-        AppendMenuW(hmenu, MF_STRING, ID_TEST_CONNECTION, to_wide_null("📊 Test Connection (YouTube / Discord / WikiLeaks)").as_ptr());
-
-        // 6. Start at Login
+        // 5. Start at Login
         let auto_label = if st.autostart_enabled {
-            "✓  Start at Login".to_string()
+            "✓  Başlangıçta Otomatik Başlat"
         } else {
-            "Start at Login".to_string()
+            "    Başlangıçta Otomatik Başlat"
         };
         let mut auto_flags = MF_STRING;
         if st.autostart_enabled {
             auto_flags |= MF_CHECKED;
         }
-        AppendMenuW(hmenu, auto_flags, ID_AUTOSTART_TOGGLE, to_wide_null(&auto_label).as_ptr());
-        if st.autostart_enabled {
-            CheckMenuItem(hmenu, ID_AUTOSTART_TOGGLE as u32, MF_BYCOMMAND | MF_CHECKED);
-        }
+        AppendMenuW(hmenu, auto_flags, ID_AUTOSTART_TOGGLE, to_wide_null(auto_label).as_ptr());
 
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
-        // 7. Quit
-        AppendMenuW(hmenu, MF_STRING, ID_QUIT, to_wide_null("🚪 Quit GhostLink").as_ptr());
+        // 6. Quit
+        AppendMenuW(hmenu, MF_STRING, ID_QUIT, to_wide_null("🚪 GhostLink Tepsisini Kapat").as_ptr());
 
         let mut pt: POINT = std::mem::zeroed();
         GetCursorPos(&mut pt);
 
         SetForegroundWindow(hwnd);
-        TrackPopupMenuEx(hmenu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, hwnd, std::ptr::null());
+        let cmd = TrackPopupMenuEx(
+            hmenu,
+            TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            hwnd,
+            std::ptr::null(),
+        );
+        PostMessageW(hwnd, WM_NULL, 0, 0);
         DestroyMenu(hmenu);
+
+        MENU_OPEN.store(false, Ordering::SeqCst);
+
+        if cmd != 0 {
+            handle_menu_command(hwnd, cmd as usize);
+        }
     }
 
     unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -464,14 +478,12 @@ mod windows_tray {
                 0
             }
             WM_TIMER => {
-                if wparam == TIMER_ID {
+                if wparam == TIMER_ID && !MENU_OPEN.load(Ordering::SeqCst) {
                     update_tray_tooltip(hwnd);
                 }
                 0
             }
             WM_COMMAND => {
-                let id = (wparam & 0xFFFF) as usize;
-                handle_menu_command(hwnd, id);
                 0
             }
             WM_DESTROY => {
