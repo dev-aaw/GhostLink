@@ -445,7 +445,18 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
                     }
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                match ghostlink_engine::engine::system_proxy::SystemProxyManager::configure_windows_dns(&servers) {
+                    Ok(()) => IpcResponse::Ok {
+                        message: format!("Windows DNS servers configured to {:?}", servers),
+                    },
+                    Err(e) => IpcResponse::Error {
+                        error: format!("Failed to configure Windows DNS: {}", e),
+                    },
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 let _ = servers;
                 IpcResponse::Ok { message: "DNS configuration is automatic on this platform".to_string() }
@@ -477,7 +488,18 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
                     }
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                match ghostlink_engine::engine::system_proxy::SystemProxyManager::reset_windows_dns() {
+                    Ok(()) => IpcResponse::Ok {
+                        message: "Windows DNS reset to DHCP default and cache flushed".to_string(),
+                    },
+                    Err(e) => IpcResponse::Error {
+                        error: format!("Failed to reset Windows DNS: {}", e),
+                    },
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 IpcResponse::Ok { message: "DNS reset completed".to_string() }
             }

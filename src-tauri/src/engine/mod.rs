@@ -241,9 +241,7 @@ impl UnblockEngine {
             let _ = proc.kill();
         }
 
-        if cfg!(target_os = "macos") {
-            let _ = self.proxy_mgr.disable_macos_proxy();
-        }
+        let _ = self.proxy_mgr.restore_all_system_settings();
 
         #[cfg(target_os = "windows")]
         {

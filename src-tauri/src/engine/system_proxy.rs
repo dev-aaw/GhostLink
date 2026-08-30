@@ -160,12 +160,144 @@ impl SystemProxyManager {
         }
         Ok(())
     }
+
+    /// Detect active physical network adapters on Windows.
+    pub fn detect_active_windows_adapters() -> Vec<String> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut adapters = Vec::new();
+            let output = crate::engine::silent_command("netsh.exe")
+                .args(["interface", "ipv4", "show", "interfaces"])
+                .output();
+
+            if let Ok(out) = output {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.contains("connected") || trimmed.contains("Bağlandı") {
+                        if let Some(name_start) = trimmed.rfind("connected") {
+                            let name = trimmed[name_start + 9..].trim();
+                            if !name.is_empty() && !name.starts_with("Loopback") && !name.starts_with("wg") {
+                                adapters.push(name.to_string());
+                            }
+                        } else if let Some(name_start) = trimmed.rfind("Bağlandı") {
+                            let name = trimmed[name_start + 8..].trim();
+                            if !name.is_empty() && !name.starts_with("Loopback") && !name.starts_with("wg") {
+                                adapters.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if adapters.is_empty() {
+                adapters.push("Ethernet".to_string());
+                adapters.push("Wi-Fi".to_string());
+            }
+
+            adapters
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Configure static clean DNS servers on all active Windows adapters.
+    pub fn configure_windows_dns(servers: &[String]) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            if servers.is_empty() {
+                return Self::reset_windows_dns();
+            }
+
+            let adapters = Self::detect_active_windows_adapters();
+            println!("🌐 [Windows DNS] Configuring DNS on active adapters {:?} to {:?}", adapters, servers);
+
+            for adapter in &adapters {
+                // Set primary DNS
+                let _ = crate::engine::silent_command("netsh.exe")
+                    .args(["interface", "ipv4", "set", "dns", adapter, "static", &servers[0], "primary"])
+                    .status();
+
+                // Add secondary DNS if provided
+                for (idx, server) in servers.iter().skip(1).enumerate() {
+                    let _ = crate::engine::silent_command("netsh.exe")
+                        .args(["interface", "ipv4", "add", "dns", adapter, server, &format!("index={}", idx + 2)])
+                        .status();
+                }
+            }
+
+            // Flush DNS Cache
+            let _ = crate::engine::silent_command("ipconfig.exe")
+                .args(["/flushdns"])
+                .status();
+        }
+        Ok(())
+    }
+
+    /// Reset DNS settings on all Windows adapters to DHCP (Automatic) and flush DNS cache.
+    pub fn reset_windows_dns() -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut adapters = Self::detect_active_windows_adapters();
+            if !adapters.iter().any(|a| a == "Ethernet") {
+                adapters.push("Ethernet".to_string());
+            }
+            if !adapters.iter().any(|a| a == "Wi-Fi") {
+                adapters.push("Wi-Fi".to_string());
+            }
+
+            println!("🌐 [Windows DNS] Resetting DNS on adapters {:?} to DHCP (Automatic)...", adapters);
+
+            for adapter in &adapters {
+                // 1. netsh IPv4 DHCP reset
+                let _ = crate::engine::silent_command("netsh.exe")
+                    .args(["interface", "ipv4", "set", "dns", adapter, "source=dhcp"])
+                    .status();
+
+                // 2. netsh IPv6 DHCP reset
+                let _ = crate::engine::silent_command("netsh.exe")
+                    .args(["interface", "ipv6", "set", "dns", adapter, "source=dhcp"])
+                    .status();
+
+                // 3. PowerShell Set-DnsClientServerAddress reset
+                let ps_cmd = format!("Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses -ErrorAction SilentlyContinue", adapter);
+                let _ = crate::engine::silent_command("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+                    .status();
+            }
+
+            // 4. Flush DNS Resolver Cache
+            let _ = crate::engine::silent_command("ipconfig.exe")
+                .args(["/flushdns"])
+                .status();
+            let _ = crate::engine::silent_command("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Clear-DnsClientCache -ErrorAction SilentlyContinue"])
+                .status();
+
+            println!("✨ [Windows DNS] DNS reset to DHCP and cache flushed successfully.");
+        }
+        Ok(())
+    }
+
+    /// Restore all system network settings on current platform (Proxy + DNS).
+    pub fn restore_all_system_settings(&mut self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            self.disable_macos_proxy()?;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self::reset_windows_dns()?;
+        }
+        self.proxy_is_active = false;
+        Ok(())
+    }
 }
 
 impl Drop for SystemProxyManager {
     fn drop(&mut self) {
-        if self.proxy_is_active {
-            let _ = self.disable_macos_proxy();
-        }
+        let _ = self.restore_all_system_settings();
     }
 }
