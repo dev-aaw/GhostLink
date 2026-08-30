@@ -330,6 +330,8 @@ impl SystemProxyManager {
 
 impl Drop for SystemProxyManager {
     fn drop(&mut self) {
-        let _ = self.restore_all_system_settings();
+        if self.proxy_is_active {
+            let _ = self.restore_all_system_settings();
+        }
     }
 }
