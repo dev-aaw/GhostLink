@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use anyhow::{anyhow, Result};
 use ghostlink_engine::engine::ipc::{
     DaemonStatusInfo, IpcRequest, IpcResponse, WINDOWS_IPC_ADDR,
@@ -167,6 +169,30 @@ async fn main() -> Result<()> {
         });
 
         println!("✅ GhostLink Windows Daemon is ready to process requests.");
+
+        // 2. Automatically launch DPI Bypass Engine on daemon boot (zero delay on PC startup)
+        let state_for_autostart = Arc::clone(&state);
+        tokio::spawn(async move {
+            let target_strat = {
+                let st = state_for_autostart.lock().await;
+                let strats = st.engine.list_strategies();
+                strats.iter().find(|s| s.id == "win-alt9")
+                    .or_else(|| strats.first())
+                    .cloned()
+            };
+
+            if let Some(strat) = target_strat {
+                println!("🚀 [AutoStart] Automatically starting engine on boot with strategy [{}]...", strat.name);
+                let mut st = state_for_autostart.lock().await;
+                if let Err(e) = st.engine.start(&strat).await {
+                    eprintln!("⚠️ [AutoStart] Failed to auto-start engine on boot: {}", e);
+                } else {
+                    st.active_strategy = Some(strat);
+                    println!("✨ [AutoStart] Engine is ACTIVE on boot with clean DNS and winws desync.");
+                }
+            }
+        });
+
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
