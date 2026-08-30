@@ -154,6 +154,19 @@ async fn main() -> Result<()> {
 
     #[cfg(windows)]
     {
+        // 1. Register Windows Console Control Handler for graceful shutdown/logoff/close
+        unsafe {
+            use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+            unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> windows_sys::Win32::Foundation::BOOL {
+                let _ = ctrl_type;
+                let _ = ghostlink_engine::silent_command("taskkill.exe")
+                    .args(["/F", "/IM", "winws.exe"])
+                    .status();
+                1
+            }
+            SetConsoleCtrlHandler(Some(ctrl_handler), 1);
+        }
+
         let listener = TcpListener::bind(WINDOWS_IPC_ADDR).await
             .map_err(|e| anyhow!("Failed to bind GhostLink Windows service to {}: {}", WINDOWS_IPC_ADDR, e))?;
 
@@ -191,8 +204,44 @@ async fn main() -> Result<()> {
                 } else {
                     st.active_strategy = Some(strat.clone());
                     let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&strat.id);
-                    println!("✨ [AutoStart] Engine is ACTIVE on boot with strategy [{}] (clean DNS and winws desync).", strat.name);
+                    println!("✨ [AutoStart] Engine is ACTIVE on boot with strategy [{}] (winws desync).", strat.name);
                 }
+            }
+        });
+
+        // 3. Resilience Watchdog & Network Transition Monitor (Wi-Fi <-> Ethernet / Sleep-Wake)
+        let state_for_watchdog = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut last_adapters = ghostlink_engine::SystemProxyManager::detect_active_windows_adapters();
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+
+                // Watchdog Check
+                let (needs_revival, strat_to_revive) = {
+                    let mut st = state_for_watchdog.lock().await;
+                    if st.engine.is_running() && !st.engine.check_health() {
+                        (true, st.active_strategy.clone())
+                    } else {
+                        (false, None)
+                    }
+                };
+
+                if needs_revival {
+                    if let Some(strat) = strat_to_revive {
+                        eprintln!("⚠️ [Watchdog] Detected winws crash/stop! Reviving engine immediately...");
+                        let mut st = state_for_watchdog.lock().await;
+                        let _ = st.engine.start(&strat).await;
+                        println!("✨ [Watchdog] winws revived successfully with strategy [{}].", strat.name);
+                    }
+                }
+
+                // Network Transition Check
+                let current_adapters = ghostlink_engine::SystemProxyManager::detect_active_windows_adapters();
+                if !last_adapters.is_empty() && last_adapters != current_adapters {
+                    println!("🌐 [Network Transition] Network interface change detected: {:?} -> {:?}", last_adapters, current_adapters);
+                    let _ = ghostlink_engine::silent_command("ipconfig.exe").args(["/flushdns"]).status();
+                }
+                last_adapters = current_adapters;
             }
         });
 
@@ -274,6 +323,17 @@ async fn handle_tcp_connection(stream: TcpStream, state: Arc<Mutex<DaemonState>>
     let mut line = String::new();
 
     while reader.read_line(&mut line).await? > 0 {
+        if line.len() > 65536 {
+            let err_resp = IpcResponse::Error {
+                error: "Payload too large (exceeds 64KB limit)".to_string(),
+            };
+            let mut out = serde_json::to_string(&err_resp)?;
+            out.push('\n');
+            let _ = writer.write_all(out.as_bytes()).await;
+            let _ = writer.flush().await;
+            break;
+        }
+
         let trimmed = line.trim();
         if trimmed.is_empty() {
             line.clear();

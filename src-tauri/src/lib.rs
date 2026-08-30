@@ -12,6 +12,7 @@ pub use engine::{
     strategies::{StrategyManager, StrategyConfigManager},
     types::{EngineConfig, EngineState, Platform, ProbeResult, ProbeRule, ProbeSummary, ProbeTier, Strategy},
     wireguard::{WireGuardManager, WireGuardState, WireGuardTunnelInfo},
+    system_proxy::SystemProxyManager,
     silent_command,
     UnblockEngine,
 };

@@ -89,6 +89,15 @@ impl UnblockEngine {
         matches!(self.state, EngineState::Running { .. })
     }
 
+    /// Check if the active DPI bypass process is healthy and alive.
+    pub fn check_health(&mut self) -> bool {
+        if let Some(ref mut proc) = self.active_process {
+            proc.is_alive()
+        } else {
+            !self.is_running()
+        }
+    }
+
     pub fn list_strategies(&self) -> Vec<Strategy> {
         let bin_dir = self.binary_mgr.bin_dir();
         self.strategy_mgr.list_strategies(bin_dir, self.config.socks_port)
