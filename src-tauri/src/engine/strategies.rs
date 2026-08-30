@@ -23,10 +23,10 @@ impl StrategyManager {
             Ok(())
         };
 
-        // 1. Google / YouTube
+        // 1. Google / YouTube (Web, API, Video Streams, Thumbnails, Avatars)
         write_list(
             "list-google.txt",
-            "googlevideo.com\nyoutube.com\nyoutubekids.com\nytimg.com\nyoutu.be\nyoutubei.googleapis.com\nyt4.ggpht.com\nyt3.ggpht.com\nyt2.ggpht.com\nyt1.ggpht.com\ngvt1.com\nvideo.google.com\nplay.google.com\nwide-youtube.l.google.com\nredirector.googlevideo.com\njnn-pa.googleapis.com\n",
+            "googlevideo.com\nyoutube.com\nyoutubekids.com\nytimg.com\ni.ytimg.com\nggpht.com\nyt.akamaized.net\nyoutu.be\nyoutubei.googleapis.com\nyoutube-nocookie.com\nyoutube-ui.l.google.com\nyt-video-upload.l.google.com\ngoogleusercontent.com\ngoogleapis.com\ngvt1.com\ngvt2.com\nvideo.google.com\nplay.google.com\nwide-youtube.l.google.com\nredirector.googlevideo.com\njnn-pa.googleapis.com\n1e100.net\n",
         )?;
 
         // 2. Discord (Web, App, Gateway, Media, CDN)
@@ -224,14 +224,14 @@ impl StrategyManager {
         // Flowseal official multi-rule builder
         let build_windows_flowseal_rules = |r4_google: Vec<String>, r5_discord: Vec<String>, r6_general: Vec<String>, r7_ipset: Vec<String>| -> Vec<String> {
             let mut args = wf_full.clone();
-            // Rule 1: UDP 443 QUIC (Google / YouTube)
+            // Rule 1: UDP 443 QUIC (Google / YouTube) - force instant TCP fallback with 11 repeats
             args.extend([
                 "--filter-udp=443".to_string(),
                 format!("--hostlist={}", l("list-google.txt")),
                 "--dpi-desync=fake".to_string(),
-                "--dpi-desync-repeats=6".to_string(),
+                "--dpi-desync-repeats=11".to_string(),
                 format!("--dpi-desync-fake-quic={}", quic_g),
-                "--dpi-desync-cutoff=d2".to_string(),
+                "--dpi-desync-cutoff=d4".to_string(),
                 "--new".to_string(),
             ]);
             // Rule 2: UDP Discord Voice (STUN & WebRTC)
@@ -313,10 +313,10 @@ impl StrategyManager {
             Strategy {
                 id: "win-general".to_string(),
                 name: "Windows General (Flowseal Multi-Rule - Recommended)".to_string(),
-                description: "Official multi-tier desync (Google Fake + Discord Multi-Split 681B + General Hostfakesplit ozon.ru).".to_string(),
+                description: "Official multi-tier desync (Google/YouTube Multi-Split + Discord Multi-Split 681B + General Hostfakesplit ozon.ru).".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
-                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
