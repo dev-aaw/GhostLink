@@ -224,7 +224,7 @@ impl SystemProxyManager {
             let s_joined = servers.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(",");
 
             for adapter in &adapters {
-                // 1. PowerShell Set-DnsClientServerAddress (fastest & most reliable on Windows 10/11)
+                // 1. PowerShell Set-DnsClientServerAddress (InterfaceAlias and InterfaceIndex)
                 let ps_cmd = format!(
                     "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({}) -ErrorAction SilentlyContinue",
                     adapter, s_joined
@@ -233,14 +233,14 @@ impl SystemProxyManager {
                     .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
                     .status();
 
-                // 2. netsh IPv4 static primary & secondary DNS fallback
+                // 2. netsh IPv4 static primary & secondary DNS fallback (with validate=no for immediate application)
                 let _ = crate::engine::silent_command("netsh.exe")
-                    .args(["interface", "ipv4", "set", "dns", adapter, "static", &servers[0], "primary"])
+                    .args(["interface", "ipv4", "set", "dnsservers", &format!("name={}", adapter), "source=static", &format!("address={}", servers[0]), "validate=no"])
                     .status();
 
                 for (idx, server) in servers.iter().skip(1).enumerate() {
                     let _ = crate::engine::silent_command("netsh.exe")
-                        .args(["interface", "ipv4", "add", "dns", adapter, server, &format!("index={}", idx + 2)])
+                        .args(["interface", "ipv4", "add", "dnsservers", &format!("name={}", adapter), &format!("address={}", server), &format!("index={}", idx + 2), "validate=no"])
                         .status();
                 }
             }
@@ -291,12 +291,12 @@ impl SystemProxyManager {
 
                 // 2. netsh IPv4 DHCP reset
                 let _ = crate::engine::silent_command("netsh.exe")
-                    .args(["interface", "ipv4", "set", "dns", adapter, "source=dhcp"])
+                    .args(["interface", "ipv4", "set", "dnsservers", &format!("name={}", adapter), "source=dhcp"])
                     .status();
 
                 // 3. netsh IPv6 DHCP reset
                 let _ = crate::engine::silent_command("netsh.exe")
-                    .args(["interface", "ipv6", "set", "dns", adapter, "source=dhcp"])
+                    .args(["interface", "ipv6", "set", "dnsservers", &format!("name={}", adapter), "source=dhcp"])
                     .status();
             }
 
