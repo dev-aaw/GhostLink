@@ -274,6 +274,7 @@ impl StrategyManager {
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-discord.txt")),
+                "--ip-id=zero".to_string(),
             ]);
             args.extend(r5_discord);
             args.push("--new".to_string());
@@ -282,6 +283,7 @@ impl StrategyManager {
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-sensitive.txt")),
+                "--ip-id=zero".to_string(),
             ]);
             args.extend(r6_sensitive);
             args.push("--new".to_string());
@@ -292,6 +294,7 @@ impl StrategyManager {
                 format!("--hostlist={}", l("list-general.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
+                "--ip-id=zero".to_string(),
             ]);
             args.extend(r7_general);
             args.push("--new".to_string());
@@ -302,10 +305,11 @@ impl StrategyManager {
                 format!("--ipset={}", l("ipset-all.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
+                "--ip-id=zero".to_string(),
                 "--dpi-desync=multisplit".to_string(),
-                "--dpi-desync-split-seqovl=568".to_string(),
-                "--dpi-desync-split-pos=1".to_string(),
-                format!("--dpi-desync-split-seqovl-pattern={}", tls_4),
+                "--dpi-desync-split-seqovl=681".to_string(),
+                "--dpi-desync-split-pos=1,sniext+1".to_string(),
+                format!("--dpi-desync-split-seqovl-pattern={}", tls_g),
                 "--dpi-desync-cutoff=n2".to_string(),
                 "--new".to_string(),
             ]);
@@ -329,13 +333,13 @@ impl StrategyManager {
             Strategy {
                 id: "win-general".to_string(),
                 name: "Windows General (Flowseal Default - Recommended)".to_string(),
-                description: "Official Flowseal multisplit 681/568 with isolated WikiLeaks TLS desync. Zero connection resets, fully tested across ISPs.".to_string(),
+                description: "Universal multisplit 681 with ip-id=zero and SNI extension boundary split. Zero resets across all sites.".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                 ),
             },
             Strategy {
