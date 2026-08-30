@@ -264,12 +264,11 @@ impl StrategyManager {
             args.extend(r4_google);
             args.push("--new".to_string());
 
-            // Rule 5: Unified Blocked TCP 80,443 (Discord, WikiLeaks, Instagram, X/Twitter, etc.)
+            // Rule 5: Unified Blocked TCP 443 (Discord, WikiLeaks, Instagram, X/Twitter, etc.)
             args.extend([
-                "--filter-tcp=80,443".to_string(),
+                "--filter-tcp=443".to_string(),
                 format!("--hostlist={}", l("list-general.txt")),
-                format!("--hostlist-exclude={}", l("list-exclude.txt")),
-                format!("--ipset-exclude={}", l("ipset-exclude.txt")),
+                "--ip-id=zero".to_string(),
             ]);
             args.extend(r5_general);
             args.push("--new".to_string());
@@ -304,11 +303,11 @@ impl StrategyManager {
             Strategy {
                 id: "win-general".to_string(),
                 name: "Windows General (Flowseal Default - Recommended)".to_string(),
-                description: "Official Flowseal multisplit 681/681 with ClientHello pattern matching. Zero connection resets, fully tested across ISPs.".to_string(),
+                description: "Official Flowseal multisplit 681/568 with ClientHello pattern matching. Zero connection resets, fully tested across ISPs.".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
                     vec!["--dpi-desync-cutoff=n2".into()],
                     vec![],
                 ),
