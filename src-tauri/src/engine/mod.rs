@@ -168,6 +168,14 @@ impl UnblockEngine {
                 }
             }
             println!("✅ WinDivert kernel packet filter active & transparently desyncing L3/L4 TCP & UDP traffic.");
+
+            // Configure clean DNS servers (Cloudflare / Google) to defeat ISP DNS poisoning/hijacking
+            let clean_dns = vec![
+                "1.1.1.1".to_string(),
+                "1.0.0.1".to_string(),
+                "8.8.8.8".to_string(),
+            ];
+            let _ = self.proxy_mgr.enable_windows_dns(&clean_dns);
         }
 
         self.state = EngineState::Running {

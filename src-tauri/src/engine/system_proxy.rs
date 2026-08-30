@@ -211,16 +211,33 @@ impl SystemProxyManager {
                 return Self::reset_windows_dns();
             }
 
-            let adapters = Self::detect_active_windows_adapters();
-            println!("🌐 [Windows DNS] Configuring DNS on active adapters {:?} to {:?}", adapters, servers);
+            let mut adapters = Self::detect_active_windows_adapters();
+            if !adapters.iter().any(|a| a == "Ethernet") {
+                adapters.push("Ethernet".to_string());
+            }
+            if !adapters.iter().any(|a| a == "Wi-Fi") {
+                adapters.push("Wi-Fi".to_string());
+            }
+
+            println!("🌐 [Windows DNS] Configuring clean DNS on active adapters {:?} to {:?}", adapters, servers);
+
+            let s_joined = servers.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(",");
 
             for adapter in &adapters {
-                // Set primary DNS
+                // 1. PowerShell Set-DnsClientServerAddress (fastest & most reliable on Windows 10/11)
+                let ps_cmd = format!(
+                    "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({}) -ErrorAction SilentlyContinue",
+                    adapter, s_joined
+                );
+                let _ = crate::engine::silent_command("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+                    .status();
+
+                // 2. netsh IPv4 static primary & secondary DNS fallback
                 let _ = crate::engine::silent_command("netsh.exe")
                     .args(["interface", "ipv4", "set", "dns", adapter, "static", &servers[0], "primary"])
                     .status();
 
-                // Add secondary DNS if provided
                 for (idx, server) in servers.iter().skip(1).enumerate() {
                     let _ = crate::engine::silent_command("netsh.exe")
                         .args(["interface", "ipv4", "add", "dns", adapter, server, &format!("index={}", idx + 2)])
@@ -228,10 +245,25 @@ impl SystemProxyManager {
                 }
             }
 
-            // Flush DNS Cache
+            // 3. Flush DNS Cache
             let _ = crate::engine::silent_command("ipconfig.exe")
                 .args(["/flushdns"])
                 .status();
+            let _ = crate::engine::silent_command("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Clear-DnsClientCache -ErrorAction SilentlyContinue"])
+                .status();
+
+            println!("✨ [Windows DNS] Clean DNS configured and cache flushed successfully.");
+        }
+        Ok(())
+    }
+
+    /// Enable clean DNS on Windows for active engine state.
+    pub fn enable_windows_dns(&mut self, servers: &[String]) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            Self::configure_windows_dns(servers)?;
+            self.proxy_is_active = true;
         }
         Ok(())
     }
@@ -251,20 +283,20 @@ impl SystemProxyManager {
             println!("🌐 [Windows DNS] Resetting DNS on adapters {:?} to DHCP (Automatic)...", adapters);
 
             for adapter in &adapters {
-                // 1. netsh IPv4 DHCP reset
+                // 1. PowerShell Set-DnsClientServerAddress reset
+                let ps_cmd = format!("Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses -ErrorAction SilentlyContinue", adapter);
+                let _ = crate::engine::silent_command("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+                    .status();
+
+                // 2. netsh IPv4 DHCP reset
                 let _ = crate::engine::silent_command("netsh.exe")
                     .args(["interface", "ipv4", "set", "dns", adapter, "source=dhcp"])
                     .status();
 
-                // 2. netsh IPv6 DHCP reset
+                // 3. netsh IPv6 DHCP reset
                 let _ = crate::engine::silent_command("netsh.exe")
                     .args(["interface", "ipv6", "set", "dns", adapter, "source=dhcp"])
-                    .status();
-
-                // 3. PowerShell Set-DnsClientServerAddress reset
-                let ps_cmd = format!("Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses -ErrorAction SilentlyContinue", adapter);
-                let _ = crate::engine::silent_command("powershell.exe")
-                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
                     .status();
             }
 
