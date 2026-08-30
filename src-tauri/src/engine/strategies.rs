@@ -29,38 +29,31 @@ impl StrategyManager {
             "googlevideo.com\nyoutube.com\nyoutubekids.com\nytimg.com\nyoutu.be\nyoutubei.googleapis.com\nyt4.ggpht.com\nyt3.ggpht.com\nyt2.ggpht.com\nyt1.ggpht.com\ngvt1.com\nvideo.google.com\nplay.google.com\nwide-youtube.l.google.com\nredirector.googlevideo.com\njnn-pa.googleapis.com\n",
         )?;
 
-        // 2. Discord (Web, App, Gateway, CDN)
+        // 2. Discord (Specific domains)
         write_list(
             "list-discord.txt",
             "discord.com\ndiscord.gg\ndiscordapp.com\ndiscordapp.net\ndiscord.media\ndiscordcdn.com\ngateway.discord.gg\ncdn.discordapp.com\nmedia.discordapp.net\nstatus.discord.com\nlatency.discord.media\n",
         )?;
 
-        // 3. Sensitive / Strict TLS Handshake Sites (WikiLeaks etc.)
-        // These servers fail with fake SNI pattern overlap; they need clean TCP split
-        write_list(
-            "list-sensitive.txt",
-            "wikileaks.org\nwww.wikileaks.org\n",
-        )?;
-
-        // 4. General Blocked Domains (Social Media, etc.)
+        // 3. Unified General Blocked Domains (Discord, WikiLeaks, Instagram, X/Twitter, etc.)
         write_list(
             "list-general.txt",
-            "instagram.com\ncdninstagram.com\nfbcdn.net\ntwitter.com\nx.com\nt.co\ntwimg.com\n",
+            "discord.com\ndiscord.gg\ndiscordapp.com\ndiscordapp.net\ndiscord.media\ndiscordcdn.com\ngateway.discord.gg\ncdn.discordapp.com\nmedia.discordapp.net\nstatus.discord.com\nlatency.discord.media\nwikileaks.org\nwww.wikileaks.org\nwl-storage.org\nfile.wikileaks.org\ninstagram.com\ncdninstagram.com\nfbcdn.net\ntwitter.com\nx.com\nt.co\ntwimg.com\n",
         )?;
 
-        // 5. Exclude Domains (Routers, Speedtest, ISP Portals)
+        // 4. Exclude Domains (Routers, Speedtest, ISP Portals)
         write_list(
             "list-exclude.txt",
             "127.0.0.1\nlocalhost\n::1\nrouter.asus.com\ntplinkwifi.net\nmy.router\nspeedtest.net\nfast.com\nturktelekom.com.tr\nturkcell.com.tr\nvodafone.com.tr\n",
         )?;
 
-        // 6. IP-set All (DNS Providers only - never put CDN ranges here)
+        // 5. IP-set All (DNS Providers only - never put CDN ranges here)
         write_list(
             "ipset-all.txt",
             "1.1.1.1\n1.0.0.1\n8.8.8.8\n8.8.4.4\n9.9.9.9\n149.112.112.112\n",
         )?;
 
-        // 7. IP-set Exclude (Private LAN)
+        // 6. IP-set Exclude (Private LAN)
         write_list(
             "ipset-exclude.txt",
             "10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16\n127.0.0.0/8\n",
@@ -227,8 +220,8 @@ impl StrategyManager {
             "--wf-udp=443,19294-19344,50000-50100".to_string(),
         ];
 
-        // Flowseal standard multi-rule builder with isolated domain & protocol handling
-        let build_windows_flowseal_rules = |r4_google: Vec<String>, r7_general: Vec<String>, r8_ipset: Vec<String>, r9_udp: Vec<String>| -> Vec<String> {
+        // Flowseal official multi-rule builder with unified general hostlist
+        let build_windows_flowseal_rules = |r4_google: Vec<String>, r5_general: Vec<String>, r6_ipset: Vec<String>, r7_udp: Vec<String>| -> Vec<String> {
             let mut args = wf_full.clone();
             // Rule 1: UDP 443 QUIC (Google / YouTube)
             args.extend([
@@ -271,49 +264,27 @@ impl StrategyManager {
             args.extend(r4_google);
             args.push("--new".to_string());
 
-            // Rule 5: Discord Web / App / Gateway / CDN TCP 80,443 (multisplit 681 google pattern)
-            args.extend([
-                "--filter-tcp=80,443".to_string(),
-                format!("--hostlist={}", l("list-discord.txt")),
-                "--dpi-desync=multisplit".to_string(),
-                "--dpi-desync-split-seqovl=681".to_string(),
-                "--dpi-desync-split-pos=1".to_string(),
-                format!("--dpi-desync-split-seqovl-pattern={}", tls_g),
-                "--new".to_string(),
-            ]);
-
-            // Rule 6: Sensitive / Strict TLS Handshake Sites (WikiLeaks etc.)
-            args.extend([
-                "--filter-tcp=80,443".to_string(),
-                format!("--hostlist={}", l("list-sensitive.txt")),
-                "--dpi-desync=multisplit".to_string(),
-                "--dpi-desync-split-seqovl=681".to_string(),
-                "--dpi-desync-split-pos=1".to_string(),
-                format!("--dpi-desync-split-seqovl-pattern={}", tls_g),
-                "--new".to_string(),
-            ]);
-
-            // Rule 7: General Blocked TCP (Instagram, Twitter/X, etc.)
+            // Rule 5: Unified Blocked TCP 80,443 (Discord, WikiLeaks, Instagram, X/Twitter, etc.)
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-general.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
             ]);
-            args.extend(r7_general);
+            args.extend(r5_general);
             args.push("--new".to_string());
 
-            // Rule 8: IP-set TCP Fallback
+            // Rule 6: IP-set TCP Fallback
             args.extend([
                 "--filter-tcp=80,443,8443".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
             ]);
-            args.extend(r8_ipset);
+            args.extend(r6_ipset);
             args.push("--new".to_string());
 
-            // Rule 9: UDP Game / Catch-All
+            // Rule 7: UDP Game / Catch-All
             args.extend([
                 "--filter-udp=12".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
@@ -324,7 +295,7 @@ impl StrategyManager {
                 format!("--dpi-desync-fake-unknown-udp={}", quic_d),
                 "--dpi-desync-cutoff=d2".to_string(),
             ]);
-            args.extend(r9_udp);
+            args.extend(r7_udp);
 
             args
         };
@@ -333,13 +304,13 @@ impl StrategyManager {
             Strategy {
                 id: "win-general".to_string(),
                 name: "Windows General (Flowseal Default - Recommended)".to_string(),
-                description: "Official Flowseal multisplit 681/568 with ClientHello pattern matching. Zero connection resets, fully tested across ISPs.".to_string(),
+                description: "Official Flowseal multisplit 681/681 with ClientHello pattern matching. Zero connection resets, fully tested across ISPs.".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                     vec!["--dpi-desync-cutoff=n2".into()],
+                    vec![],
                 ),
             },
             Strategy {
@@ -350,8 +321,8 @@ impl StrategyManager {
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=568".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=568".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
                     vec!["--dpi-desync-cutoff=n2".into()],
+                    vec![],
                 ),
             },
             Strategy {
@@ -362,8 +333,8 @@ impl StrategyManager {
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com".into()],
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
-                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
                     vec!["--dpi-desync-cutoff=n2".into()],
+                    vec![],
                 ),
             },
             Strategy {
@@ -374,8 +345,8 @@ impl StrategyManager {
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=syndata".into()],
                     vec!["--dpi-desync-cutoff=n2".into()],
+                    vec![],
                 ),
             },
             Strategy {
@@ -386,8 +357,8 @@ impl StrategyManager {
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru".into(), "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
-                    vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru".into(), "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync-cutoff=n4".into()],
+                    vec![],
                 ),
             },
             Strategy {
@@ -398,8 +369,8 @@ impl StrategyManager {
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
                     vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_4)],
-                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_4)],
                     vec!["--dpi-desync-cutoff=n3".into()],
+                    vec![],
                 ),
             },
         ]
