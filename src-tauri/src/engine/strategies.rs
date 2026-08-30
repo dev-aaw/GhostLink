@@ -334,7 +334,7 @@ impl StrategyManager {
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
-                    vec!["--dpi-desync=split2".into(), "--dpi-desync-split-pos=1".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
                 ),
             },
