@@ -74,6 +74,28 @@ impl ProbeRunner {
                 reject_body_pattern: Some(BLOCK_NOTICE_REGEX.to_string()),
                 expected_hex_prefix: None,
             },
+            // 6. Instagram Probe
+            ProbeRule {
+                id: "instagram".to_string(),
+                label: "Instagram Portal".to_string(),
+                url: "https://www.instagram.com/".to_string(),
+                tier: ProbeTier::Full,
+                expected_statuses: vec![200],
+                required_body_pattern: Some(r"(?i)(instagram|<title>[^<]*instagram)".to_string()),
+                reject_body_pattern: Some(BLOCK_NOTICE_REGEX.to_string()),
+                expected_hex_prefix: None,
+            },
+            // 7. X (Twitter) Probe
+            ProbeRule {
+                id: "x-twitter".to_string(),
+                label: "X (Twitter) Portal".to_string(),
+                url: "https://x.com/".to_string(),
+                tier: ProbeTier::Full,
+                expected_statuses: vec![200],
+                required_body_pattern: Some(r"(?i)(x\.com|twitter|<title>[^<]*x)".to_string()),
+                reject_body_pattern: Some(BLOCK_NOTICE_REGEX.to_string()),
+                expected_hex_prefix: None,
+            },
         ];
 
         Self { rules }

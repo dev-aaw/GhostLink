@@ -426,10 +426,13 @@ mod windows_tray {
 
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
-        // 4. Test Connection (Probe)
-        AppendMenuW(hmenu, MF_STRING, ID_TEST_CONNECTION, to_wide_null("📊 Bağlantı Testi (Discord / YouTube / WikiLeaks)").as_ptr());
+        // 4. Auto-Tune Benchmark
+        AppendMenuW(hmenu, MF_STRING, ID_AUTOTUNE, to_wide_null("🔄  Auto-Tune Benchmark (En Hızlı Stratejiyi Seç)").as_ptr());
 
-        // 5. Start at Login
+        // 5. Test Connection (Probe)
+        AppendMenuW(hmenu, MF_STRING, ID_TEST_CONNECTION, to_wide_null("📊  Bağlantı Testi (Discord / WikiLeaks / YouTube / Instagram / X)").as_ptr());
+
+        // 6. Start at Login
         let auto_label = if st.autostart_enabled {
             "✓  Başlangıçta Otomatik Başlat"
         } else {
@@ -443,8 +446,8 @@ mod windows_tray {
 
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
-        // 6. Quit
-        AppendMenuW(hmenu, MF_STRING, ID_QUIT, to_wide_null("🚪 GhostLink Tepsisini Kapat").as_ptr());
+        // 7. Quit
+        AppendMenuW(hmenu, MF_STRING, ID_QUIT, to_wide_null("🚪  GhostLink Tepsisini Kapat").as_ptr());
 
         let mut pt: POINT = std::mem::zeroed();
         GetCursorPos(&mut pt);
@@ -530,10 +533,10 @@ mod windows_tray {
                                     let mut st = state_arc.lock().unwrap();
                                     st.is_gl_running = false;
                                 }
-                                notify("GhostLink", "GhostLink DPI Bypass stopped");
+                                notify("GhostLink", "GhostLink DPI Bypass durduruldu.");
                             }
                             Err(e) => {
-                                notify("GhostLink Error", &format!("Failed to stop: {}", e));
+                                notify("GhostLink Hata", &format!("Durdurulamadı: {}", e));
                             }
                         }
                     } else {
@@ -547,10 +550,10 @@ mod windows_tray {
                                     let mut st = state_arc.lock().unwrap();
                                     st.is_gl_running = true;
                                 }
-                                notify("GhostLink", "GhostLink DPI Bypass is now ACTIVE");
+                                notify("GhostLink", "GhostLink DPI Bypass AKTİF edildi.");
                             }
                             Err(e) => {
-                                notify("GhostLink Error", &format!("Failed to start: {}", e));
+                                notify("GhostLink Hata", &format!("Başlatılamadı: {}", e));
                             }
                         }
                     }
@@ -572,63 +575,68 @@ mod windows_tray {
                     match res {
                         Ok(WireGuardState::Connected) => {
                             state_arc.lock().unwrap().wireguard_connected = true;
-                            notify("GhostLink VPN", &format!("WireGuard [{}] Connected", tunnel));
+                            notify("GhostLink VPN", &format!("WireGuard [{}] Bağlandı", tunnel));
                         }
                         Ok(WireGuardState::Disconnected) => {
                             state_arc.lock().unwrap().wireguard_connected = false;
-                            notify("GhostLink VPN", &format!("WireGuard [{}] Disconnected", tunnel));
+                            notify("GhostLink VPN", &format!("WireGuard [{}] Bağlantı Kesildi", tunnel));
                         }
                         Ok(WireGuardState::Connecting) => {
-                            notify("GhostLink VPN", &format!("WireGuard [{}] Connecting...", tunnel));
+                            notify("GhostLink VPN", &format!("WireGuard [{}] Bağlanıyor...", tunnel));
                         }
                         Ok(WireGuardState::Disconnecting) => {
-                            notify("GhostLink VPN", &format!("WireGuard [{}] Disconnecting...", tunnel));
+                            notify("GhostLink VPN", &format!("WireGuard [{}] Bağlantı Kesiliyor...", tunnel));
                         }
                         Ok(WireGuardState::Unknown(msg)) => {
-                            notify("GhostLink VPN", &format!("WireGuard state: {}", msg));
+                            notify("GhostLink VPN", &format!("WireGuard durumu: {}", msg));
                         }
                         Err(e) => {
-                            notify("GhostLink VPN Error", &format!("Failed to toggle WireGuard: {}", e));
+                            notify("GhostLink VPN Hatası", &format!("WireGuard işlemi başarısız: {}", e));
                         }
                     }
                 });
             }
             ID_AUTOTUNE => {
                 handle.spawn(async move {
-                    notify("GhostLink Auto-Tune", "Benchmarking strategies for current ISP in progress...");
+                    notify("GhostLink Auto-Tune", "ISS için tüm stratejiler test ediliyor...");
                     let mut engine = UnblockEngine::new(EngineConfig::default());
                     match engine.auto_tune(|_, _, _, _| {}).await {
                         Ok(Some(best)) => {
                             notify(
-                                "GhostLink Auto-Tune Complete",
-                                &format!("🏆 Best Strategy: {}\nSwitching automatically...", best.name),
+                                "GhostLink Auto-Tune Tamamlandı",
+                                &format!("🏆 En İyi Strateji: {}\nOtomatik olarak aktif ediliyor...", best.name),
                             );
                             let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&best.id);
                             let _ = client.start(&best.id, None, true).await;
                         }
                         Ok(None) => {
-                            notify("GhostLink Auto-Tune", "No working strategy found among candidates.");
+                            notify("GhostLink Auto-Tune", "Adaylar arasında çalışan strateji bulunamadı.");
                         }
                         Err(e) => {
-                            notify("GhostLink Auto-Tune", &format!("Auto-tune error: {}", e));
+                            notify("GhostLink Auto-Tune", &format!("Auto-tune hatası: {}", e));
                         }
                     }
                 });
             }
             ID_TEST_CONNECTION => {
                 handle.spawn(async move {
-                    notify("GhostLink", "Testing connection endpoints...");
+                    notify("GhostLink", "Servis bağlantı noktaları test ediliyor (Discord, WikiLeaks, YouTube, Instagram, X)...");
                     let runner = ProbeRunner::new();
                     let summary = runner.run_suite("probe", None).await;
                     if summary.success {
+                        let avg = if !summary.results.is_empty() {
+                            summary.total_latency_ms / summary.results.len() as u64
+                        } else {
+                            summary.total_latency_ms
+                        };
                         notify(
-                            "GhostLink Connection Test",
-                            &format!("✅ ALL PROBES PASSED!\nTotal Latency: {}ms", summary.total_latency_ms),
+                            "GhostLink Bağlantı Testi",
+                            &format!("✅ TÜM SERVİSLER AKTİF!\nOrtalama Gecikme: {}ms (Toplam: {}ms)", avg, summary.total_latency_ms),
                         );
                     } else {
                         notify(
-                            "GhostLink Connection Test",
-                            "⚠️ Some endpoints could not be reached.",
+                            "GhostLink Bağlantı Testi",
+                            "⚠️ Bazı servisler yanıt vermedi.",
                         );
                     }
                 });
