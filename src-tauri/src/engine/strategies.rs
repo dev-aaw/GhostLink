@@ -283,12 +283,13 @@ impl StrategyManager {
             ]);
 
             // Rule 6: Sensitive / Strict TLS Handshake Sites (WikiLeaks etc.)
-            // Pure TCP split at byte 1 without fake SNI overlap to preserve strict BoringSSL handshake
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-sensitive.txt")),
-                "--dpi-desync=split".to_string(),
+                "--dpi-desync=multisplit".to_string(),
+                "--dpi-desync-split-seqovl=681".to_string(),
                 "--dpi-desync-split-pos=1".to_string(),
+                format!("--dpi-desync-split-seqovl-pattern={}", tls_g),
                 "--new".to_string(),
             ]);
 
