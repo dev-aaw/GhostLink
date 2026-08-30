@@ -291,6 +291,7 @@ vodafone.com.tr
         let tls_4 = q("tls_clienthello_4pda_to.bin");
         let quic_g = q("quic_initial_www_google_com.bin");
         let quic_d = q("quic_initial_dbankcloud_ru.bin");
+        let stun = q("stun.bin");
 
         let wf_full = vec![
             "--wf-tcp=80,443,2053,2083,2087,2096,8443".to_string(),
@@ -309,6 +310,7 @@ vodafone.com.tr
                 "--dpi-desync=fake".to_string(),
                 "--dpi-desync-repeats=6".to_string(),
                 format!("--dpi-desync-fake-quic={}", quic_g),
+                "--dpi-desync-cutoff=d2".to_string(),
                 "--new".to_string(),
             ]);
             // Rule 2: UDP Discord Voice (STUN & WebRTC)
@@ -317,8 +319,9 @@ vodafone.com.tr
                 "--filter-l7=discord,stun".to_string(),
                 "--dpi-desync=fake".to_string(),
                 format!("--dpi-desync-fake-discord={}", quic_d),
-                format!("--dpi-desync-fake-stun={}", quic_d),
+                format!("--dpi-desync-fake-stun={}", stun),
                 "--dpi-desync-repeats=6".to_string(),
+                "--dpi-desync-cutoff=d3".to_string(),
                 "--new".to_string(),
             ]);
             // Rule 3: Discord Media TCP
@@ -357,6 +360,7 @@ vodafone.com.tr
                 "--dpi-desync=fake".to_string(),
                 "--dpi-desync-repeats=6".to_string(),
                 format!("--dpi-desync-fake-quic={}", quic_g),
+                "--dpi-desync-cutoff=d2".to_string(),
                 "--new".to_string(),
             ]);
 
@@ -379,6 +383,7 @@ vodafone.com.tr
                 "--dpi-desync-repeats=12".to_string(),
                 "--dpi-desync-any-protocol=1".to_string(),
                 format!("--dpi-desync-fake-unknown-udp={}", quic_d),
+                "--dpi-desync-cutoff=d2".to_string(),
             ]);
             args.extend(r8);
 

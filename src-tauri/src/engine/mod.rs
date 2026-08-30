@@ -187,6 +187,9 @@ impl UnblockEngine {
         let socks_port = self.config.socks_port;
         let watchdog_flag = self.watchdog_running.clone();
         watchdog_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        let exe_path_clone = self.binary_mgr.get_executable_path();
+        let strategy_args_clone = strategy.args.clone();
+        let strategy_name_clone = strategy.name.clone();
 
         tokio::spawn(async move {
             while watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
@@ -229,10 +232,25 @@ impl UnblockEngine {
                     }
                 }
 
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(target_os = "windows")]
                 {
-                    // On Windows, WinDivert driver unloads automatically on process exit
                     let _ = socks_port;
+                    // Check if winws.exe is still alive
+                    let is_winws_alive = crate::engine::silent_command("tasklist.exe")
+                        .args(["/FI", "IMAGENAME eq winws.exe", "/NH"])
+                        .output()
+                        .map(|out| {
+                            let text = String::from_utf8_lossy(&out.stdout);
+                            text.contains("winws.exe")
+                        })
+                        .unwrap_or(true);
+
+                    if !is_winws_alive && watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        eprintln!("\n🚨 EMERGENCY WATCHDOG: winws.exe exited! Auto-restarting engine with [{}]...", strategy_name_clone);
+                        if let Ok(new_proc) = ProcessHandle::spawn(&exe_path_clone, &strategy_args_clone) {
+                            eprintln!("✨ Engine auto-recovered successfully (PID: {}).\n", new_proc.id());
+                        }
+                    }
                 }
             }
         });

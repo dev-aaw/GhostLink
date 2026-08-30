@@ -126,6 +126,10 @@ impl ProcessHandle {
         }
     }
 
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Terminate the child process immediately.
     pub fn kill(&mut self) -> Result<()> {
         let _ = self.child.kill();
