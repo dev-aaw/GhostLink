@@ -35,31 +35,25 @@ impl StrategyManager {
             "discord.com\ndiscord.gg\ndiscordapp.com\ndiscordapp.net\ndiscord.media\ndiscordcdn.com\ngateway.discord.gg\ncdn.discordapp.com\nmedia.discordapp.net\nstatus.discord.com\nlatency.discord.media\ndiscordapp.io\ndiscord.co\n",
         )?;
 
-        // 3. Sensitive / Strict TLS Handshake Sites (WikiLeaks)
-        write_list(
-            "list-sensitive.txt",
-            "wikileaks.org\nwww.wikileaks.org\nwl-storage.org\nfile.wikileaks.org\n",
-        )?;
-
-        // 4. Unified General Blocked Domains (Instagram, X/Twitter, etc.)
+        // 3. General Blocked Domains (WikiLeaks, Instagram, X/Twitter, etc.)
         write_list(
             "list-general.txt",
-            "instagram.com\ncdninstagram.com\nfbcdn.net\ntwitter.com\nx.com\nt.co\ntwimg.com\n",
+            "wikileaks.org\nwww.wikileaks.org\nwl-storage.org\nfile.wikileaks.org\ninstagram.com\ncdninstagram.com\nfbcdn.net\ntwitter.com\nx.com\nt.co\ntwimg.com\n",
         )?;
 
-        // 5. Exclude Domains (Routers, Speedtest, ISP Portals)
+        // 4. Exclude Domains (Routers, Speedtest, ISP Portals)
         write_list(
             "list-exclude.txt",
             "127.0.0.1\nlocalhost\n::1\nrouter.asus.com\ntplinkwifi.net\nmy.router\nspeedtest.net\nfast.com\nturktelekom.com.tr\nturkcell.com.tr\nvodafone.com.tr\n",
         )?;
 
-        // 6. IP-set All (DNS Providers only - never put CDN ranges here)
+        // 5. IP-set All (DNS Providers only - never put CDN ranges here)
         write_list(
             "ipset-all.txt",
             "1.1.1.1\n1.0.0.1\n8.8.8.8\n8.8.4.4\n9.9.9.9\n149.112.112.112\n",
         )?;
 
-        // 7. IP-set Exclude (Private LAN)
+        // 6. IP-set Exclude (Private LAN)
         write_list(
             "ipset-exclude.txt",
             "10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16\n127.0.0.0/8\n",
@@ -217,6 +211,7 @@ impl StrategyManager {
 
         let tls_g = q("tls_clienthello_www_google_com.bin");
         let tls_4 = q("tls_clienthello_4pda_to.bin");
+        let _tls_m = q("tls_clienthello_max_ru.bin");
         let quic_g = q("quic_initial_www_google_com.bin");
         let quic_d = q("quic_initial_dbankcloud_ru.bin");
         let stun = q("stun.bin");
@@ -226,8 +221,8 @@ impl StrategyManager {
             "--wf-udp=443,19294-19344,50000-50100".to_string(),
         ];
 
-        // Flowseal official multi-rule builder with isolated sensitive handler
-        let build_windows_flowseal_rules = |r4_google: Vec<String>, r5_discord: Vec<String>, r6_sensitive: Vec<String>, r7_general: Vec<String>| -> Vec<String> {
+        // Flowseal official multi-rule builder
+        let build_windows_flowseal_rules = |r4_google: Vec<String>, r5_discord: Vec<String>, r6_general: Vec<String>, r7_ipset: Vec<String>| -> Vec<String> {
             let mut args = wf_full.clone();
             // Rule 1: UDP 443 QUIC (Google / YouTube)
             args.extend([
@@ -239,7 +234,7 @@ impl StrategyManager {
                 "--dpi-desync-cutoff=d2".to_string(),
                 "--new".to_string(),
             ]);
-            // Rule 2: UDP Discord Voice (STUN & WebRTC) - UNTOUCHED
+            // Rule 2: UDP Discord Voice (STUN & WebRTC)
             args.extend([
                 "--filter-udp=19294-19344,50000-50100".to_string(),
                 "--filter-l7=discord,stun".to_string(),
@@ -265,7 +260,6 @@ impl StrategyManager {
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-google.txt")),
-                "--ip-id=zero".to_string(),
             ]);
             args.extend(r4_google);
             args.push("--new".to_string());
@@ -274,47 +268,33 @@ impl StrategyManager {
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-discord.txt")),
-                "--ip-id=zero".to_string(),
             ]);
             args.extend(r5_discord);
             args.push("--new".to_string());
 
-            // Rule 6: Sensitive / Strict TLS Handshake Sites (WikiLeaks)
-            args.extend([
-                "--filter-tcp=80,443".to_string(),
-                format!("--hostlist={}", l("list-sensitive.txt")),
-                "--ip-id=zero".to_string(),
-            ]);
-            args.extend(r6_sensitive);
-            args.push("--new".to_string());
-
-            // Rule 7: General Blocked TCP 80,443 (Instagram, X/Twitter, etc.)
+            // Rule 6: General Blocked TCP 80,443 (WikiLeaks, Instagram, X/Twitter, etc.)
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-general.txt")),
+                format!("--hostlist-exclude={}", l("list-discord.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
-                "--ip-id=zero".to_string(),
             ]);
-            args.extend(r7_general);
+            args.extend(r6_general);
             args.push("--new".to_string());
 
-            // Rule 8: IP-set TCP Fallback
+            // Rule 7: IP-set TCP Fallback
             args.extend([
                 "--filter-tcp=80,443,8443".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
+                format!("--hostlist-exclude={}", l("list-discord.txt")),
                 format!("--hostlist-exclude={}", l("list-exclude.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
-                "--ip-id=zero".to_string(),
-                "--dpi-desync=multisplit".to_string(),
-                "--dpi-desync-split-seqovl=681".to_string(),
-                "--dpi-desync-split-pos=1,sniext+1".to_string(),
-                format!("--dpi-desync-split-seqovl-pattern={}", tls_g),
-                "--dpi-desync-cutoff=n2".to_string(),
-                "--new".to_string(),
             ]);
+            args.extend(r7_ipset);
+            args.push("--new".to_string());
 
-            // Rule 9: UDP Game / Catch-All
+            // Rule 8: UDP Game / Catch-All
             args.extend([
                 "--filter-udp=12".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
@@ -332,38 +312,38 @@ impl StrategyManager {
         vec![
             Strategy {
                 id: "win-general".to_string(),
-                name: "Windows General (Flowseal Default - Recommended)".to_string(),
-                description: "Universal multisplit 681 with ip-id=zero and SNI extension boundary split. Zero resets across all sites.".to_string(),
+                name: "Windows General (Flowseal Multi-Rule - Recommended)".to_string(),
+                description: "Official multi-tier desync (Google Fake + Discord Multi-Split 681B + General Hostfakesplit ozon.ru).".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=681".into(), "--dpi-desync-split-pos=1,sniext+1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
                 ),
             },
             Strategy {
                 id: "win-alt".to_string(),
-                name: "Windows ALT (SNI Ext Split)".to_string(),
-                description: "Multi-split at SNI extension boundary with sequence overlap. Highly effective against deep packet inspection.".to_string(),
+                name: "Windows ALT (Hostfakesplit ozon.ru)".to_string(),
+                description: "Hostfakesplit desync with ozon.ru host modifier and timestamp + md5sig fooling.".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=568".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
-                    vec!["--dpi-desync=split2".into(), "--dpi-desync-split-pos=1".into()],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=568".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4)],
+                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
                 ),
             },
             Strategy {
                 id: "win-alt9".to_string(),
-                name: "Windows ALT9 (Hostfakesplit)".to_string(),
-                description: "Official Flowseal ALT9 hostfakesplit with google/ozon domain modifiers and timestamp fooling.".to_string(),
+                name: "Windows ALT9 (Badsum Multi-Split)".to_string(),
+                description: "Multi-split desynchronization with Badsum TCP checksum fooling.".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
-                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=badsum".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=badsum".into()],
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
-                    vec!["--dpi-desync=split2".into(), "--dpi-desync-split-pos=1".into()],
-                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
                 ),
             },
             Strategy {
@@ -372,10 +352,10 @@ impl StrategyManager {
                 description: "Multi-split at position 2 and SNI extension + 1 with 679 byte pattern overlap.".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
-                    vec!["--dpi-desync=split2".into(), "--dpi-desync-split-pos=1".into()],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g)],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=2,sniext+1".into(), "--dpi-desync-split-seqovl=679".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
                 ),
             },
             Strategy {
@@ -385,9 +365,9 @@ impl StrategyManager {
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
-                    vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru".into(), "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
-                    vec!["--dpi-desync=split2".into(), "--dpi-desync-split-pos=1".into()],
-                    vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru".into(), "--dpi-desync-hostfakesplit-mod=host=ya.ru,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=fake,hostfakesplit".into(), "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com".into(), "--dpi-desync-hostfakesplit-mod=host=www.google.com,altorder=1".into(), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
                 ),
             },
             Strategy {
@@ -397,9 +377,9 @@ impl StrategyManager {
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
-                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_4)],
-                    vec!["--dpi-desync=split2".into(), "--dpi-desync-split-pos=1".into()],
-                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_4)],
+                    vec!["--dpi-desync=fake".into(), "--dpi-desync-repeats=6".into(), "--dpi-desync-fooling=ts".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
                 ),
             },
         ]

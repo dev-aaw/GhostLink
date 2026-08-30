@@ -16,13 +16,27 @@ impl ProcessHandle {
         let mut cmd = Command::new(exe_path);
         cmd.args(args);
 
-        // Security: Write logs to ~/.ghostlink/engine.log (user-owned directory),
-        // NOT /tmp (world-writable, vulnerable to symlink attacks when daemon runs as root).
+        // Set working directory to binary's directory so WinDivert.dll/WinDivert64.sys/cygwin1.dll are found
+        if let Some(parent) = exe_path.parent() {
+            cmd.current_dir(parent);
+        }
+
+        // Security & Stability: Write engine logs to a stable path
         let log_path = {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            let dir = std::path::PathBuf::from(home).join(".ghostlink");
-            let _ = std::fs::create_dir_all(&dir);
-            dir.join("engine.log")
+            #[cfg(target_os = "windows")]
+            {
+                let pdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+                let dir = std::path::PathBuf::from(pdata).join("GhostLink").join("logs");
+                let _ = std::fs::create_dir_all(&dir);
+                dir.join("engine.log")
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                let dir = std::path::PathBuf::from(home).join(".ghostlink");
+                let _ = std::fs::create_dir_all(&dir);
+                dir.join("engine.log")
+            }
         };
 
         // Security: Refuse to open if path is a symlink (prevents symlink-following attacks)

@@ -44,8 +44,8 @@ mod windows_tray {
     }
 
     static GLOBAL_STATE: Mutex<Option<Arc<Mutex<TrayState>>>> = Mutex::new(None);
-    static GLOBAL_RUNTIME: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
-    static GLOBAL_CLIENT: Mutex<Option<DaemonClient>> = Mutex::new(None);
+    static GLOBAL_HANDLE: Mutex<Option<tokio::runtime::Handle>> = Mutex::new(None);
+    static GLOBAL_CLIENT: Mutex<Option<Arc<DaemonClient>>> = Mutex::new(None);
     static IS_RUNNING: AtomicBool = AtomicBool::new(true);
 
     fn detect_primary_wg_tunnel() -> String {
@@ -58,7 +58,6 @@ mod windows_tray {
         }
     }
 
-    /// Enable native Dark Mode for Win32 menus and windows on Windows 10/11
     unsafe fn enable_dark_mode(hwnd: HWND) {
         let uxtheme_dll = LoadLibraryW(to_wide_null("uxtheme.dll").as_ptr());
         if !uxtheme_dll.is_null() {
@@ -67,7 +66,7 @@ mod windows_tray {
 
             if let Some(proc) = GetProcAddress(uxtheme_dll, 135 as *const u8) {
                 let set_mode: FnSetPreferredAppMode = std::mem::transmute(proc);
-                set_mode(2); // ForceDark
+                set_mode(2);
             }
             if let Some(proc) = GetProcAddress(uxtheme_dll, 136 as *const u8) {
                 let flush: FnFlushMenuThemes = std::mem::transmute(proc);
@@ -93,7 +92,6 @@ mod windows_tray {
         }
     }
 
-    /// Generate a stylized, neon-cyan glowing 👻 GhostLink icon for the System Tray
     unsafe fn create_ghostlink_icon() -> HICON {
         let width: u32 = 32;
         let height: u32 = 32;
@@ -165,14 +163,14 @@ mod windows_tray {
 
     pub fn run_tray() -> Result<()> {
         println!("===============================================================");
-        println!(" 👻 GhostLink System Tray (Debug Console Live Monitor Active)");
+        println!(" 👻 GhostLink System Tray (Production 24/7 Engine Active)");
         println!("===============================================================");
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
 
-        let client = DaemonClient::default();
+        let client = Arc::new(DaemonClient::default());
         let engine = UnblockEngine::new(EngineConfig::default());
         let strategies = engine.list_strategies();
 
@@ -187,6 +185,11 @@ mod windows_tray {
         let initial_wg_state = WireGuardManager::status(&detected_wg) == WireGuardState::Connected;
         println!("🚀 [Init] Strategy: '{}' | WireGuard Tunnel: '{}' (Connected: {})", default_strat_name, detected_wg, initial_wg_state);
 
+        // Auto-register start on login
+        if let Ok(exe_path) = std::env::current_exe() {
+            let _ = AutoStartManager::enable(&exe_path);
+        }
+
         let state = Arc::new(Mutex::new(TrayState {
             is_gl_running: false,
             active_strategy_id: default_strat_id,
@@ -198,8 +201,50 @@ mod windows_tray {
         }));
 
         *GLOBAL_STATE.lock().unwrap() = Some(state.clone());
-        *GLOBAL_CLIENT.lock().unwrap() = Some(client);
-        *GLOBAL_RUNTIME.lock().unwrap() = Some(rt);
+        *GLOBAL_CLIENT.lock().unwrap() = Some(client.clone());
+        *GLOBAL_HANDLE.lock().unwrap() = Some(rt.handle().clone());
+
+        // Spawn a single background poll task (ZERO thread allocation per tick)
+        let state_poller = state.clone();
+        let client_poller = client.clone();
+        rt.spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                if !IS_RUNNING.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let is_alive = client_poller.is_daemon_alive().await;
+                if is_alive {
+                    if let Ok(status) = client_poller.get_status().await {
+                        let mut st = state_poller.lock().unwrap();
+                        st.is_gl_running = status.is_running;
+                        if let Some(n) = status.active_strategy_name {
+                            st.active_strategy_name = n;
+                        }
+                        if let Some(id) = status.active_strategy_id {
+                            st.active_strategy_id = id;
+                        }
+                    }
+                } else {
+                    let mut st = state_poller.lock().unwrap();
+                    st.is_gl_running = false;
+                }
+
+                let wg_name = {
+                    let st = state_poller.lock().unwrap();
+                    st.wireguard_tunnel_name.clone()
+                };
+                let is_wg = WireGuardManager::status(&wg_name) == WireGuardState::Connected;
+                let is_auto = AutoStartManager::is_enabled();
+
+                {
+                    let mut st = state_poller.lock().unwrap();
+                    st.wireguard_connected = is_wg;
+                    st.autostart_enabled = is_auto;
+                }
+            }
+        });
 
         unsafe {
             let hinstance = GetModuleHandleW(std::ptr::null());
@@ -228,11 +273,11 @@ mod windows_tray {
                 0,
                 class_name.as_ptr(),
                 to_wide_null("GhostLink System Tray").as_ptr(),
-                WS_OVERLAPPEDWINDOW,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 hinstance,
@@ -260,9 +305,7 @@ mod windows_tray {
 
             Shell_NotifyIconW(NIM_ADD, &nid);
 
-            SetTimer(hwnd, TIMER_ID, 1500, None);
-
-            refresh_state_from_daemon(hwnd as usize);
+            SetTimer(hwnd, TIMER_ID, 2000, None);
 
             println!("✅ Tray Icon active in taskbar. Click the 👻 icon to open menu.");
 
@@ -278,69 +321,35 @@ mod windows_tray {
         Ok(())
     }
 
-    fn refresh_state_from_daemon(hwnd_val: usize) {
+    unsafe fn update_tray_tooltip(hwnd: HWND) {
         let state_arc = match GLOBAL_STATE.lock().unwrap().clone() {
             Some(s) => s,
             None => return,
         };
 
-        std::thread::spawn(move || {
-            let (is_running, strategy_name, strategy_id) = {
-                let rt_guard = GLOBAL_RUNTIME.lock().unwrap();
-                let client_guard = GLOBAL_CLIENT.lock().unwrap();
-                if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
-                    rt.block_on(async {
-                        if client.is_daemon_alive().await {
-                            if let Ok(status) = client.get_status().await {
-                                return (status.is_running, status.active_strategy_name, status.active_strategy_id);
-                            }
-                        }
-                        (false, None, None)
-                    })
-                } else {
-                    (false, None, None)
-                }
-            };
+        let (is_running, strat_name, is_wg) = {
+            let st = state_arc.lock().unwrap();
+            (st.is_gl_running, st.active_strategy_name.clone(), st.wireguard_connected)
+        };
 
-            let wg_name = {
-                let st = state_arc.lock().unwrap();
-                st.wireguard_tunnel_name.clone()
-            };
-            let is_wg_active = WireGuardManager::status(&wg_name) == WireGuardState::Connected;
-            let is_autostart = AutoStartManager::is_enabled();
+        let tip_text = format!(
+            "GhostLink: {}\nStrategy: {}\nWireGuard: {}",
+            if is_running { "ACTIVE 🟢" } else { "IDLE ⚪" },
+            strat_name,
+            if is_wg { "CONNECTED 🔵" } else { "OFF" }
+        );
 
-            let mut st = state_arc.lock().unwrap();
-            st.is_gl_running = is_running;
-            if let Some(name) = strategy_name {
-                st.active_strategy_name = name;
-            }
-            if let Some(id) = strategy_id {
-                st.active_strategy_id = id;
-            }
-            st.wireguard_connected = is_wg_active;
-            st.autostart_enabled = is_autostart;
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_TIP;
 
-            let tip_text = format!(
-                "GhostLink: {}\nStrategy: {}\nWireGuard: {}",
-                if st.is_gl_running { "ACTIVE 🟢" } else { "IDLE ⚪" },
-                st.active_strategy_name,
-                if st.wireguard_connected { "CONNECTED 🔵" } else { "OFF" }
-            );
-
-            unsafe {
-                let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-                nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-                nid.hWnd = hwnd_val as HWND;
-                nid.uID = 1;
-                nid.uFlags = NIF_TIP;
-
-                let tip = to_wide_null(&tip_text);
-                for (i, &ch) in tip.iter().take(127).enumerate() {
-                    nid.szTip[i] = ch;
-                }
-                Shell_NotifyIconW(NIM_MODIFY, &nid);
-            }
-        });
+        let tip = to_wide_null(&tip_text);
+        for (i, &ch) in tip.iter().take(127).enumerate() {
+            nid.szTip[i] = ch;
+        }
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
     unsafe fn show_context_menu(hwnd: HWND) {
@@ -456,7 +465,7 @@ mod windows_tray {
             }
             WM_TIMER => {
                 if wparam == TIMER_ID {
-                    refresh_state_from_daemon(hwnd as usize);
+                    update_tray_tooltip(hwnd);
                 }
                 0
             }
@@ -480,199 +489,135 @@ mod windows_tray {
             Some(s) => s,
             None => return,
         };
-
-        let hwnd_val = hwnd as usize;
+        let handle = match GLOBAL_HANDLE.lock().unwrap().clone() {
+            Some(h) => h,
+            None => return,
+        };
+        let client = match GLOBAL_CLIENT.lock().unwrap().clone() {
+            Some(c) => c,
+            None => return,
+        };
 
         match id {
             ID_GHOSTLINK_TOGGLE => {
-                std::thread::spawn(move || {
-                    let rt_guard = GLOBAL_RUNTIME.lock().unwrap();
-                    let client_guard = GLOBAL_CLIENT.lock().unwrap();
-                    if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
-                        rt.block_on(async {
-                            let mut is_daemon_alive = client.is_daemon_alive().await;
-                            if !is_daemon_alive {
-                                println!("   Daemon offline, attempting to wake GhostLinkService...");
-                                let _ = ghostlink_engine::silent_command("schtasks.exe")
-                                    .args(["/Run", "/TN", "GhostLinkService"])
-                                    .status();
-                                for _ in 0..6 {
-                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                    if client.is_daemon_alive().await {
-                                        is_daemon_alive = true;
-                                        break;
-                                    }
+                handle.spawn(async move {
+                    let is_daemon_alive = client.is_daemon_alive().await;
+                    let is_currently_running = if is_daemon_alive {
+                        match client.get_status().await {
+                            Ok(status) => status.is_running,
+                            Err(_) => state_arc.lock().unwrap().is_gl_running,
+                        }
+                    } else {
+                        state_arc.lock().unwrap().is_gl_running
+                    };
+
+                    if is_currently_running {
+                        match client.stop().await {
+                            Ok(_) => {
+                                {
+                                    let mut st = state_arc.lock().unwrap();
+                                    st.is_gl_running = false;
                                 }
+                                notify("GhostLink", "GhostLink DPI Bypass stopped");
                             }
-                            println!("\n👉 [User Click] GHOSTLINK TOGGLE | Daemon alive: {}", is_daemon_alive);
-
-                            let is_currently_running = if is_daemon_alive {
-                                match client.get_status().await {
-                                    Ok(status) => status.is_running,
-                                    Err(_) => state_arc.lock().unwrap().is_gl_running,
-                                }
-                            } else {
-                                state_arc.lock().unwrap().is_gl_running
-                            };
-
-                            println!("   Current Engine State: {}", if is_currently_running { "RUNNING" } else { "STOPPED" });
-
-                            if is_currently_running {
-                                println!("   -> Executing STOP...");
-                                match client.stop().await {
-                                    Ok(_) => {
-                                        {
-                                            let mut st = state_arc.lock().unwrap();
-                                            st.is_gl_running = false;
-                                        }
-                                        println!("   ✅ Engine STOPPED successfully.");
-                                        notify("GhostLink", "GhostLink DPI Bypass stopped");
-                                    }
-                                    Err(e) => {
-                                        eprintln!("   ❌ Failed to stop engine: {}", e);
-                                        notify("GhostLink Error", &format!("Failed to stop engine: {}", e));
-                                    }
-                                }
-                            } else {
-                                let strat_id = {
-                                    let st = state_arc.lock().unwrap();
-                                    st.active_strategy_id.clone()
-                                };
-                                println!("   -> Executing START with strategy '{}'...", strat_id);
-                                match client.start(&strat_id, None, true).await {
-                                    Ok(_) => {
-                                        {
-                                            let mut st = state_arc.lock().unwrap();
-                                            st.is_gl_running = true;
-                                        }
-                                        println!("   ✅ Engine STARTED successfully.");
-                                        notify("GhostLink", "GhostLink DPI Bypass is now ACTIVE");
-                                    }
-                                    Err(e) => {
-                                        eprintln!("   ❌ Failed to start engine: {}", e);
-                                        notify("GhostLink Error", &format!("Failed to start engine: {}", e));
-                                    }
-                                }
+                            Err(e) => {
+                                notify("GhostLink Error", &format!("Failed to stop: {}", e));
                             }
-                        });
+                        }
+                    } else {
+                        let strat_id = {
+                            let st = state_arc.lock().unwrap();
+                            st.active_strategy_id.clone()
+                        };
+                        match client.start(&strat_id, None, true).await {
+                            Ok(_) => {
+                                {
+                                    let mut st = state_arc.lock().unwrap();
+                                    st.is_gl_running = true;
+                                }
+                                notify("GhostLink", "GhostLink DPI Bypass is now ACTIVE");
+                            }
+                            Err(e) => {
+                                notify("GhostLink Error", &format!("Failed to start: {}", e));
+                            }
+                        }
                     }
-                    refresh_state_from_daemon(hwnd_val);
                 });
             }
             ID_WIREGUARD_TOGGLE => {
-                std::thread::spawn(move || {
+                handle.spawn(async move {
                     let tunnel = {
                         let st = state_arc.lock().unwrap();
                         st.wireguard_tunnel_name.clone()
                     };
+                    let is_daemon_alive = client.is_daemon_alive().await;
+                    let res = if is_daemon_alive {
+                        client.wireguard_toggle(&tunnel).await
+                    } else {
+                        WireGuardManager::toggle(&tunnel)
+                    };
 
-                    println!("\n👉 [User Click] WIREGUARD TOGGLE for tunnel: '{}'", tunnel);
-
-                    let rt_guard = GLOBAL_RUNTIME.lock().unwrap();
-                    let client_guard = GLOBAL_CLIENT.lock().unwrap();
-                    if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
-                        rt.block_on(async {
-                            let is_daemon_alive = client.is_daemon_alive().await;
-                            println!("   Daemon active: {}", is_daemon_alive);
-
-                            let res = if is_daemon_alive {
-                                println!("   Delegating WireGuard toggle to privileged daemon...");
-                                client.wireguard_toggle(&tunnel).await
-                            } else {
-                                println!("   Running WireGuard toggle locally...");
-                                WireGuardManager::toggle(&tunnel)
-                            };
-
-                            match res {
-                                Ok(WireGuardState::Connected) => {
-                                    {
-                                        let mut st = state_arc.lock().unwrap();
-                                        st.wireguard_connected = true;
-                                    }
-                                    println!("   ✅ WireGuard [{}] is now CONNECTED.", tunnel);
-                                    notify("GhostLink VPN", &format!("WireGuard [{}] Connected", tunnel));
-                                }
-                                Ok(WireGuardState::Disconnected) => {
-                                    {
-                                        let mut st = state_arc.lock().unwrap();
-                                        st.wireguard_connected = false;
-                                    }
-                                    println!("   ✅ WireGuard [{}] is now DISCONNECTED.", tunnel);
-                                    notify("GhostLink VPN", &format!("WireGuard [{}] Disconnected", tunnel));
-                                }
-                                Ok(WireGuardState::Connecting) => {
-                                    println!("   ⏳ WireGuard [{}] Connecting...", tunnel);
-                                    notify("GhostLink VPN", &format!("WireGuard [{}] Connecting...", tunnel));
-                                }
-                                Ok(WireGuardState::Disconnecting) => {
-                                    println!("   ⏳ WireGuard [{}] Disconnecting...", tunnel);
-                                    notify("GhostLink VPN", &format!("WireGuard [{}] Disconnecting...", tunnel));
-                                }
-                                Ok(WireGuardState::Unknown(msg)) => {
-                                    println!("   ❓ WireGuard [{}] State: {}", tunnel, msg);
-                                    notify("GhostLink VPN", &format!("WireGuard state: {}", msg));
-                                }
-                                Err(e) => {
-                                    eprintln!("   ❌ WireGuard toggle failed: {}", e);
-                                    notify("GhostLink VPN Error", &format!("Failed to toggle WireGuard: {}", e));
-                                }
-                            }
-                        });
+                    match res {
+                        Ok(WireGuardState::Connected) => {
+                            state_arc.lock().unwrap().wireguard_connected = true;
+                            notify("GhostLink VPN", &format!("WireGuard [{}] Connected", tunnel));
+                        }
+                        Ok(WireGuardState::Disconnected) => {
+                            state_arc.lock().unwrap().wireguard_connected = false;
+                            notify("GhostLink VPN", &format!("WireGuard [{}] Disconnected", tunnel));
+                        }
+                        Ok(WireGuardState::Connecting) => {
+                            notify("GhostLink VPN", &format!("WireGuard [{}] Connecting...", tunnel));
+                        }
+                        Ok(WireGuardState::Disconnecting) => {
+                            notify("GhostLink VPN", &format!("WireGuard [{}] Disconnecting...", tunnel));
+                        }
+                        Ok(WireGuardState::Unknown(msg)) => {
+                            notify("GhostLink VPN", &format!("WireGuard state: {}", msg));
+                        }
+                        Err(e) => {
+                            notify("GhostLink VPN Error", &format!("Failed to toggle WireGuard: {}", e));
+                        }
                     }
-                    refresh_state_from_daemon(hwnd_val);
                 });
             }
             ID_AUTOTUNE => {
-                std::thread::spawn(move || {
+                handle.spawn(async move {
                     notify("GhostLink Auto-Tune", "Benchmarking strategies for current ISP in progress...");
-                    let rt_guard = GLOBAL_RUNTIME.lock().unwrap();
-                    if let Some(rt) = rt_guard.as_ref() {
-                        rt.block_on(async {
-                            let mut engine = UnblockEngine::new(EngineConfig::default());
-                            match engine.auto_tune(|_, _, _, _| {}).await {
-                                Ok(Some(best)) => {
-                                    notify(
-                                        "GhostLink Auto-Tune Complete",
-                                        &format!("🏆 Best Strategy Found: {}\nSwitching automatically...", best.name),
-                                    );
-                                    let client_guard = GLOBAL_CLIENT.lock().unwrap();
-                                    if let Some(client) = client_guard.as_ref() {
-                                        let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&best.id);
-                                        let _ = client.start(&best.id, None, true).await;
-                                    }
-                                }
-                                Ok(None) => {
-                                    notify("GhostLink Auto-Tune", "No working strategy found among candidates.");
-                                }
-                                Err(e) => {
-                                    notify("GhostLink Auto-Tune", &format!("Auto-tune error: {}", e));
-                                }
-                            }
-                        });
+                    let mut engine = UnblockEngine::new(EngineConfig::default());
+                    match engine.auto_tune(|_, _, _, _| {}).await {
+                        Ok(Some(best)) => {
+                            notify(
+                                "GhostLink Auto-Tune Complete",
+                                &format!("🏆 Best Strategy: {}\nSwitching automatically...", best.name),
+                            );
+                            let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&best.id);
+                            let _ = client.start(&best.id, None, true).await;
+                        }
+                        Ok(None) => {
+                            notify("GhostLink Auto-Tune", "No working strategy found among candidates.");
+                        }
+                        Err(e) => {
+                            notify("GhostLink Auto-Tune", &format!("Auto-tune error: {}", e));
+                        }
                     }
-                    refresh_state_from_daemon(hwnd_val);
                 });
             }
             ID_TEST_CONNECTION => {
-                std::thread::spawn(move || {
-                    notify("GhostLink", "Testing connection endpoints (YouTube / Discord / WikiLeaks)...");
-                    let rt_guard = GLOBAL_RUNTIME.lock().unwrap();
-                    if let Some(rt) = rt_guard.as_ref() {
-                        rt.block_on(async {
-                            let runner = ProbeRunner::new();
-                            let summary = runner.run_suite("probe", None).await;
-                            if summary.success {
-                                notify(
-                                    "GhostLink Connection Test",
-                                    &format!("✅ ALL PROBES PASSED!\nTotal Latency: {}ms", summary.total_latency_ms),
-                                );
-                            } else {
-                                notify(
-                                    "GhostLink Connection Test",
-                                    "⚠️ Some endpoints could not be reached.",
-                                );
-                            }
-                        });
+                handle.spawn(async move {
+                    notify("GhostLink", "Testing connection endpoints...");
+                    let runner = ProbeRunner::new();
+                    let summary = runner.run_suite("probe", None).await;
+                    if summary.success {
+                        notify(
+                            "GhostLink Connection Test",
+                            &format!("✅ ALL PROBES PASSED!\nTotal Latency: {}ms", summary.total_latency_ms),
+                        );
+                    } else {
+                        notify(
+                            "GhostLink Connection Test",
+                            "⚠️ Some endpoints could not be reached.",
+                        );
                     }
                 });
             }
@@ -684,7 +629,6 @@ mod windows_tray {
                         "GhostLink",
                         if enabled { "Start at Login: ENABLED" } else { "Start at Login: DISABLED" },
                     );
-                    refresh_state_from_daemon(hwnd_val);
                 }
             }
             ID_QUIT => {
@@ -695,25 +639,17 @@ mod windows_tray {
             }
             id if id >= ID_STRATEGY_BASE => {
                 let idx = id - ID_STRATEGY_BASE;
-                std::thread::spawn(move || {
+                handle.spawn(async move {
                     let target_strat = {
                         let st = state_arc.lock().unwrap();
                         st.strategies.get(idx).cloned()
                     };
 
                     if let Some(strat) = target_strat {
-                        let rt_guard = GLOBAL_RUNTIME.lock().unwrap();
-                        let client_guard = GLOBAL_CLIENT.lock().unwrap();
-                        if let (Some(rt), Some(client)) = (rt_guard.as_ref(), client_guard.as_ref()) {
-                            rt.block_on(async {
-                                let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&strat.id);
-                                let _ = client.start(&strat.id, None, true).await;
-                                println!("⚡ [Strategy Switch] Switched to: {}", strat.name);
-                                notify("GhostLink", &format!("Strategy switched to: {}", strat.name));
-                            });
-                        }
+                        let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&strat.id);
+                        let _ = client.start(&strat.id, None, true).await;
+                        notify("GhostLink", &format!("Strategy switched to: {}", strat.name));
                     }
-                    refresh_state_from_daemon(hwnd_val);
                 });
             }
             _ => {}

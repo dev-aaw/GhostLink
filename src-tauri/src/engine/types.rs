@@ -101,14 +101,28 @@ pub struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".to_string());
-        let base_dir = PathBuf::from(home).join(".ghostlink");
-        Self {
-            base_dir,
-            socks_port: 10808,
-            apply_system_proxy: true,
+        #[cfg(target_os = "windows")]
+        {
+            let base_dir = std::env::var("ProgramData")
+                .map(|p| PathBuf::from(p).join("GhostLink"))
+                .unwrap_or_else(|_| PathBuf::from(r"C:\ProgramData\GhostLink"));
+            Self {
+                base_dir,
+                socks_port: 10808,
+                apply_system_proxy: true,
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string());
+            let base_dir = PathBuf::from(home).join(".ghostlink");
+            Self {
+                base_dir,
+                socks_port: 10808,
+                apply_system_proxy: true,
+            }
         }
     }
 }
