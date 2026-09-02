@@ -42,7 +42,27 @@ echo [*] Servis guvenilirlik ayarlari yapilandiriliyor...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$t = Get-ScheduledTask -TaskName 'GhostLinkService'; $t.Settings.DisallowStartIfOnBatteries = $false; $t.Settings.StopIfGoingOnBatteries = $false; $t.Settings.ExecutionTimeLimit = 'PT0S'; $t.Settings.RestartCount = 999; $t.Settings.RestartInterval = 'PT1M'; $t.Settings.StartWhenAvailable = $true; Set-ScheduledTask -InputObject $t" >nul 2>&1
 
 echo [*] DNS zehirlenmesine karsi temiz IP eslemeleri yapilandiriliyor (hosts)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$h = '$env:SystemRoot\System32\drivers\etc\hosts'; $lines = @('162.159.138.232 discord.com', '162.159.138.232 discord.gg', '162.159.138.232 discordapp.com', '162.159.138.232 discordapp.net', '162.159.138.232 discord.media', '162.159.138.232 discordcdn.com', '162.159.138.232 gateway.discord.gg', '162.159.138.232 cdn.discordapp.com', '162.159.138.232 media.discordapp.net', '162.159.138.232 status.discord.com', '162.159.138.232 latency.discord.media', '162.159.138.232 router.discordapp.net', '162.159.138.232 updates.discord.info', '162.159.138.232 fingerprint.discord.com', '162.159.138.232 remote-auth-gateway.discord.gg', '51.159.197.136 wikileaks.org', '51.159.197.136 www.wikileaks.org'); $c = Get-Content $h -Raw -ErrorAction SilentlyContinue; foreach ($l in $lines) { $d = $l.Split(' ')[1]; if ($c -notmatch [regex]::Escape($d)) { Add-Content -Path $h -Value $l -Encoding ascii } }" >nul 2>&1
+findstr /C:"discord.com" "%WINDIR%\System32\drivers\etc\hosts" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo.>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo # GhostLink Clean Hosts Mappings>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 discordapp.com>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 discord.media>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 discordcdn.com>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 gateway.discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 cdn.discordapp.com>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 media.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 status.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 latency.discord.media>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 router.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 fingerprint.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 162.159.138.232 remote-auth-gateway.discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 51.159.197.136 wikileaks.org>> "%WINDIR%\System32\drivers\etc\hosts"
+    echo 51.159.197.136 www.wikileaks.org>> "%WINDIR%\System32\drivers\etc\hosts"
+)
 
 echo [*] Windows 11 Guvenli Sifreli DNS (Cloudflare DoH) yapilandiriliyor...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-DnsClientDohServerAddress -ServerAddress '1.1.1.1' -AutoUpgrade `$true -ErrorAction SilentlyContinue; Set-DnsClientDohServerAddress -ServerAddress '1.0.0.1' -AutoUpgrade `$true -ErrorAction SilentlyContinue; Get-NetAdapter | Where-Object { `$_.Status -eq 'Up' } | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias `$_.InterfaceAlias -ServerAddresses ('1.1.1.1', '1.0.0.1') -ErrorAction SilentlyContinue }" >nul 2>&1
