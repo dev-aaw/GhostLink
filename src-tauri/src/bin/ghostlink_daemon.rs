@@ -181,22 +181,23 @@ async fn main() -> Result<()> {
             std::process::exit(0);
         });
 
-        println!("✅ GhostLink Windows Daemon is ready to process requests.");
+        println!("📡 Listening on Windows TCP IPC: {} (127.0.0.1:49281)", WINDOWS_IPC_ADDR);
 
-        // 2. Automatically launch DPI Bypass Engine on daemon boot (zero delay on PC startup)
+        // 1.5 Ensure Clean Hosts Mappings for Discord & WikiLeaks against ISP DNS Poisoning
+        ensure_clean_hosts();
+
+        // 2. Production 24/7 Engine AutoStart on Boot
         let state_for_autostart = Arc::clone(&state);
+        let default_strategy = state.lock().await.engine.list_strategies().into_iter().find(|s| s.id == "win-general");
         tokio::spawn(async move {
-            let saved_id = ghostlink_engine::StrategyConfigManager::load_selected_strategy();
-            let target_strat = {
+            let saved_strat_id = ghostlink_engine::StrategyConfigManager::load_selected_strategy();
+            let strat_opt = {
                 let st = state_for_autostart.lock().await;
-                let strats = st.engine.list_strategies();
-                strats.iter().find(|s| s.id == saved_id)
-                    .or_else(|| strats.iter().find(|s| s.id == "win-general"))
-                    .or_else(|| strats.first())
-                    .cloned()
-            };
+                let list = st.engine.list_strategies();
+                list.into_iter().find(|s| s.id == saved_strat_id)
+            }.or(default_strategy);
 
-            if let Some(strat) = target_strat {
+            if let Some(strat) = strat_opt {
                 println!("🚀 [AutoStart] Automatically starting engine on boot with strategy [{}]...", strat.name);
                 let mut st = state_for_autostart.lock().await;
                 if let Err(e) = st.engine.start(&strat).await {
@@ -748,3 +749,47 @@ fn is_windows_admin() -> bool {
     }
     false
 }
+
+#[cfg(windows)]
+fn ensure_clean_hosts() {
+    let hosts_path = r"C:\Windows\System32\drivers\etc\hosts";
+    let entries = [
+        "162.159.138.232 discord.com",
+        "162.159.138.232 discord.gg",
+        "162.159.138.232 discordapp.com",
+        "162.159.138.232 discordapp.net",
+        "162.159.138.232 discord.media",
+        "162.159.138.232 discordcdn.com",
+        "162.159.138.232 gateway.discord.gg",
+        "162.159.138.232 cdn.discordapp.com",
+        "162.159.138.232 media.discordapp.net",
+        "162.159.138.232 status.discord.com",
+        "162.159.138.232 latency.discord.media",
+        "162.159.138.232 router.discordapp.net",
+        "162.159.138.232 fingerprint.discord.com",
+        "162.159.138.232 remote-auth-gateway.discord.gg",
+        "51.159.197.136 wikileaks.org",
+        "51.159.197.136 www.wikileaks.org",
+    ];
+
+    if let Ok(content) = std::fs::read_to_string(hosts_path) {
+        let mut new_content = content.clone();
+        let mut modified = false;
+        for entry in &entries {
+            let domain = entry.split_whitespace().nth(1).unwrap_or("");
+            if !domain.is_empty() && !content.contains(domain) {
+                if !new_content.ends_with('\n') && !new_content.is_empty() {
+                    new_content.push('\n');
+                }
+                new_content.push_str(&format!("{}\n", entry));
+                modified = true;
+            }
+        }
+        if modified {
+            let _ = std::fs::write(hosts_path, new_content);
+            let _ = ghostlink_engine::silent_command("ipconfig.exe").arg("/flushdns").output();
+            println!("🛡️ [DNS] Clean hosts mappings synchronized for Discord & WikiLeaks.");
+        }
+    }
+}
+
