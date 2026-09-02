@@ -317,11 +317,11 @@ impl StrategyManager {
             Strategy {
                 id: "win-general".to_string(),
                 name: "Windows General (Flowseal Multi-Rule - Recommended)".to_string(),
-                description: "Official multi-tier desync (Universal Fake+Split2 for YouTube & Discord + General Hostfakesplit ozon.ru).".to_string(),
+                description: "Official multi-tier desync (Google/YouTube Multi-Split + Discord Multi-Split + General Hostfakesplit ozon.ru).".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
-                    vec!["--dpi-desync=fake,split2".into(), "--dpi-desync-split-seqovl=1".into(), "--dpi-desync-split-tls=sniext".into(), format!("--dpi-desync-fake-tls={}", tls_g), "--dpi-desync-fooling=ts".into(), "--dpi-desync-repeats=6".into()],
-                    vec!["--dpi-desync=fake,split2".into(), "--dpi-desync-split-seqovl=1".into(), "--dpi-desync-split-tls=sniext".into(), format!("--dpi-desync-fake-tls={}", tls_g), "--dpi-desync-fooling=ts".into(), "--dpi-desync-repeats=6".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
                 ),

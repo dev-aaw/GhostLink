@@ -17,11 +17,13 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [*] Gecmis gorevler ve islemler durduruluyor...
+echo [*] Gecmis gorevler, islemler ve kilitli Discord surecleri durduruluyor...
 schtasks /End /TN GhostLinkService >nul 2>&1
 taskkill /F /IM ghostlink_tray.exe >nul 2>&1
 taskkill /F /IM ghostlink_daemon.exe >nul 2>&1
 taskkill /F /IM winws.exe >nul 2>&1
+taskkill /F /IM Discord.exe >nul 2>&1
+taskkill /F /IM Update.exe >nul 2>&1
 
 echo [*] Dizinler hazirlaniyor: C:\ProgramData\GhostLink
 if not exist "C:\ProgramData\GhostLink\bin" mkdir "C:\ProgramData\GhostLink\bin"
