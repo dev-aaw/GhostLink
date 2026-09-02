@@ -23,16 +23,17 @@ impl StrategyManager {
             Ok(())
         };
 
-        // 1. Google / YouTube (Web, API, Video Streams, Thumbnails, Avatars)
+        // 1. YouTube / Googlevideo (Web, Video Streams, Thumbnails, Avatars)
+        // NOTE: NEVER include generic 'googleapis.com' or '1e100.net' as it breaks Google OAuth / accounts / IDE APIs.
         write_list(
             "list-google.txt",
-            "googlevideo.com\nyoutube.com\nyoutubekids.com\nytimg.com\ni.ytimg.com\nggpht.com\nyt.akamaized.net\nyoutu.be\nyoutubei.googleapis.com\nyoutube-nocookie.com\nyoutube-ui.l.google.com\nyt-video-upload.l.google.com\ngoogleusercontent.com\ngoogleapis.com\ngvt1.com\ngvt2.com\nvideo.google.com\nplay.google.com\nwide-youtube.l.google.com\nredirector.googlevideo.com\njnn-pa.googleapis.com\n1e100.net\n",
+            "googlevideo.com\nyoutube.com\nyoutubekids.com\nytimg.com\ni.ytimg.com\nggpht.com\nyt.akamaized.net\nyoutu.be\nyoutubei.googleapis.com\nyoutube-nocookie.com\nyoutube-ui.l.google.com\nyt-video-upload.l.google.com\ngvt1.com\ngvt2.com\nvideo.google.com\nwide-youtube.l.google.com\nredirector.googlevideo.com\njnn-pa.googleapis.com\n",
         )?;
 
-        // 2. Discord (Web, App, Gateway, Media, CDN)
+        // 2. Discord (Web, Desktop Electron App, Gateway, Voice, Media, CDN, Updates)
         write_list(
             "list-discord.txt",
-            "discord.com\ndiscord.gg\ndiscordapp.com\ndiscordapp.net\ndiscord.media\ndiscordcdn.com\ngateway.discord.gg\ncdn.discordapp.com\nmedia.discordapp.net\nstatus.discord.com\nlatency.discord.media\ndiscordapp.io\ndiscord.co\n",
+            "discord.com\ndiscord.gg\ndiscordapp.com\ndiscordapp.net\ndiscord.media\ndiscordcdn.com\ngateway.discord.gg\ncdn.discordapp.com\nmedia.discordapp.net\nstatus.discord.com\nlatency.discord.media\ndiscordapp.io\ndiscord.co\nupdates.discord.info\nrouter.discordapp.net\nfingerprint.discord.com\nremote-auth-gateway.discord.gg\n",
         )?;
 
         // 3. General Blocked Domains (WikiLeaks, Instagram, X/Twitter, etc.)
@@ -41,10 +42,10 @@ impl StrategyManager {
             "wikileaks.org\nwww.wikileaks.org\nwl-storage.org\nfile.wikileaks.org\ninstagram.com\ncdninstagram.com\nfbcdn.net\ntwitter.com\nx.com\nt.co\ntwimg.com\n",
         )?;
 
-        // 4. Exclude Domains (Routers, Speedtest, ISP Portals)
+        // 4. Exclude Domains (Google OAuth, Accounts, Antigravity/Gemini APIs, Routers, Speedtest)
         write_list(
             "list-exclude.txt",
-            "127.0.0.1\nlocalhost\n::1\nrouter.asus.com\ntplinkwifi.net\nmy.router\nspeedtest.net\nfast.com\nturktelekom.com.tr\nturkcell.com.tr\nvodafone.com.tr\n",
+            "127.0.0.1\nlocalhost\n::1\noauth2.googleapis.com\naccounts.google.com\naccounts.youtube.com\nmyaccount.google.com\nidentitytoolkit.googleapis.com\nsecuretoken.googleapis.com\ncloudresourcemanager.googleapis.com\ngenerativelanguage.googleapis.com\nrouter.asus.com\ntplinkwifi.net\nmy.router\nspeedtest.net\nfast.com\nturktelekom.com.tr\nturkcell.com.tr\nvodafone.com.tr\n",
         )?;
 
         // 5. IP-set All (DNS Providers only - never put CDN ranges here)
@@ -249,10 +250,12 @@ impl StrategyManager {
             args.extend([
                 "--filter-tcp=2053,2083,2087,2096,8443".to_string(),
                 "--hostlist-domains=discord.media".to_string(),
-                "--dpi-desync=multisplit".to_string(),
-                "--dpi-desync-split-seqovl=681".to_string(),
-                "--dpi-desync-split-pos=1".to_string(),
-                format!("--dpi-desync-split-seqovl-pattern={}", tls_g),
+                "--dpi-desync=fake,split2".to_string(),
+                "--dpi-desync-split-seqovl=1".to_string(),
+                "--dpi-desync-split-tls=sniext".to_string(),
+                format!("--dpi-desync-fake-tls={}", tls_g),
+                "--dpi-desync-fooling=ts".to_string(),
+                "--dpi-desync-repeats=6".to_string(),
                 "--new".to_string(),
             ]);
 
@@ -313,11 +316,11 @@ impl StrategyManager {
             Strategy {
                 id: "win-general".to_string(),
                 name: "Windows General (Flowseal Multi-Rule - Recommended)".to_string(),
-                description: "Official multi-tier desync (Google/YouTube Multi-Split + Discord Multi-Split 681B + General Hostfakesplit ozon.ru).".to_string(),
+                description: "Official multi-tier desync (Universal Fake+Split2 for YouTube & Discord + General Hostfakesplit ozon.ru).".to_string(),
                 platform: Platform::Windows,
                 args: build_windows_flowseal_rules(
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
-                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=fake,split2".into(), "--dpi-desync-split-seqovl=1".into(), "--dpi-desync-split-tls=sniext".into(), format!("--dpi-desync-fake-tls={}", tls_g), "--dpi-desync-fooling=ts".into(), "--dpi-desync-repeats=6".into()],
+                    vec!["--dpi-desync=fake,split2".into(), "--dpi-desync-split-seqovl=1".into(), "--dpi-desync-split-tls=sniext".into(), format!("--dpi-desync-fake-tls={}", tls_g), "--dpi-desync-fooling=ts".into(), "--dpi-desync-repeats=6".into()],
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
                 ),
