@@ -447,7 +447,7 @@ mod windows_tray {
         AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
 
         // 7. Quit
-        AppendMenuW(hmenu, MF_STRING, ID_QUIT, to_wide_null("🚪  GhostLink Tepsisini Kapat").as_ptr());
+        AppendMenuW(hmenu, MF_STRING, ID_QUIT, to_wide_null("🚪  GhostLink'i Tamamen Kapat (Durdur ve Çık)").as_ptr());
 
         let mut pt: POINT = std::mem::zeroed();
         GetCursorPos(&mut pt);
@@ -487,6 +487,10 @@ mod windows_tray {
                 0
             }
             WM_COMMAND => {
+                0
+            }
+            WM_CLOSE => {
+                DestroyWindow(hwnd);
                 0
             }
             WM_DESTROY => {
@@ -652,10 +656,14 @@ mod windows_tray {
                 }
             }
             ID_QUIT => {
-                println!("🚪 [Tray] Exiting GhostLink System Tray...");
-                unsafe {
-                    DestroyWindow(hwnd);
-                }
+                println!("🚪 [Tray] Stopping GhostLink Engine & Exiting Tray...");
+                let hwnd_raw = hwnd as usize;
+                handle.spawn(async move {
+                    let _ = client.stop().await;
+                    unsafe {
+                        PostMessageW(hwnd_raw as HWND, WM_CLOSE, 0, 0);
+                    }
+                });
             }
             id if id >= ID_STRATEGY_BASE => {
                 let idx = id - ID_STRATEGY_BASE;
