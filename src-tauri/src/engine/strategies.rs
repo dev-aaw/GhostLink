@@ -30,10 +30,11 @@ impl StrategyManager {
             "googlevideo.com\nyoutube.com\nyoutubekids.com\nytimg.com\ni.ytimg.com\nggpht.com\nyt.akamaized.net\nyoutu.be\nyoutubei.googleapis.com\nyoutube-nocookie.com\nyoutube-ui.l.google.com\nyt-video-upload.l.google.com\ngvt1.com\ngvt2.com\nvideo.google.com\nwide-youtube.l.google.com\nredirector.googlevideo.com\njnn-pa.googleapis.com\n",
         )?;
 
-        // 2. Discord (Web, Desktop Electron App, Gateway, Voice, Media, CDN, Updates)
+        // 2. Discord (Web, Desktop Gateway, Voice, Media, CDN)
+        // NOTE: Exclude updates.discord.com and dl2.discordapp.net so Discord updater downloads without TLS session corruption.
         write_list(
             "list-discord.txt",
-            "discord.com\ndiscord.gg\ndiscordapp.com\ndiscordapp.net\ndiscord.media\ndiscordcdn.com\ngateway.discord.gg\ncdn.discordapp.com\nmedia.discordapp.net\nstatus.discord.com\nlatency.discord.media\ndiscordapp.io\ndiscord.co\nupdates.discord.info\nrouter.discordapp.net\nfingerprint.discord.com\nremote-auth-gateway.discord.gg\n",
+            "discord.com\ndiscord.gg\ndiscordapp.com\ndiscord.media\ndiscordcdn.com\ngateway.discord.gg\ncdn.discordapp.com\nmedia.discordapp.net\nstatus.discord.com\nlatency.discord.media\ndiscordapp.io\ndiscord.co\nfingerprint.discord.com\nremote-auth-gateway.discord.gg\n",
         )?;
 
         // 3. General Blocked Domains (WikiLeaks, Instagram, X/Twitter, etc.)
@@ -42,10 +43,10 @@ impl StrategyManager {
             "wikileaks.org\nwww.wikileaks.org\nwl-storage.org\nfile.wikileaks.org\ninstagram.com\ncdninstagram.com\nfbcdn.net\ntwitter.com\nx.com\nt.co\ntwimg.com\n",
         )?;
 
-        // 4. Exclude Domains (Google OAuth, Accounts, Antigravity/Gemini APIs, Routers, Speedtest)
+        // 4. Exclude Domains (Discord Updater CDNs, Google OAuth/Accounts, Antigravity/Gemini APIs, Routers, Speedtest)
         write_list(
             "list-exclude.txt",
-            "127.0.0.1\nlocalhost\n::1\noauth2.googleapis.com\naccounts.google.com\naccounts.youtube.com\nmyaccount.google.com\nidentitytoolkit.googleapis.com\nsecuretoken.googleapis.com\ncloudresourcemanager.googleapis.com\ngenerativelanguage.googleapis.com\nrouter.asus.com\ntplinkwifi.net\nmy.router\nspeedtest.net\nfast.com\nturktelekom.com.tr\nturkcell.com.tr\nvodafone.com.tr\n",
+            "127.0.0.1\nlocalhost\n::1\nupdates.discord.com\nupdates.discord.info\ndl.discordapp.net\ndl2.discordapp.net\nstable.dl2.discordapp.net\noauth2.googleapis.com\naccounts.google.com\naccounts.youtube.com\nmyaccount.google.com\nidentitytoolkit.googleapis.com\nsecuretoken.googleapis.com\ncloudresourcemanager.googleapis.com\ngenerativelanguage.googleapis.com\nrouter.asus.com\ntplinkwifi.net\nmy.router\nspeedtest.net\nfast.com\nturktelekom.com.tr\nturkcell.com.tr\nvodafone.com.tr\n",
         )?;
 
         // 5. IP-set All (DNS Providers only - never put CDN ranges here)
