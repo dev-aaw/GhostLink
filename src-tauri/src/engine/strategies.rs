@@ -45,10 +45,10 @@ impl StrategyManager {
             "wikileaks.org\nwww.wikileaks.org\nwl-storage.org\nfile.wikileaks.org\ninstagram.com\ncdninstagram.com\nfbcdn.net\ntwitter.com\nx.com\nt.co\ntwimg.com\n",
         )?;
 
-        // 4. Exclude Domains (Discord Updater CDNs, Google OAuth/Accounts, Antigravity/Gemini APIs, Routers, Speedtest)
+        // 4. Exclude Domains (Google OAuth/Accounts, Antigravity/Gemini APIs, Routers, Speedtest, ISP sites)
         write_list(
             "list-exclude.txt",
-            "127.0.0.1\nlocalhost\n::1\nupdates.discord.com\nupdates.discord.info\ndl.discordapp.net\ndl2.discordapp.net\nstable.dl2.discordapp.net\noauth2.googleapis.com\naccounts.google.com\naccounts.youtube.com\nmyaccount.google.com\nidentitytoolkit.googleapis.com\nsecuretoken.googleapis.com\ncloudresourcemanager.googleapis.com\ngenerativelanguage.googleapis.com\nrouter.asus.com\ntplinkwifi.net\nmy.router\nspeedtest.net\nfast.com\nturktelekom.com.tr\nturkcell.com.tr\nvodafone.com.tr\n",
+            "127.0.0.1\nlocalhost\n::1\noauth2.googleapis.com\naccounts.google.com\naccounts.youtube.com\nmyaccount.google.com\nidentitytoolkit.googleapis.com\nsecuretoken.googleapis.com\ncloudresourcemanager.googleapis.com\ngenerativelanguage.googleapis.com\nrouter.asus.com\ntplinkwifi.net\nmy.router\nspeedtest.net\nfast.com\nturktelekom.com.tr\nturkcell.com.tr\nvodafone.com.tr\n",
         )?;
 
         // 5. IP-set All (DNS Providers only - never put CDN ranges here)
