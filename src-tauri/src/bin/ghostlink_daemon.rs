@@ -846,17 +846,19 @@ fn ensure_clean_hosts() {
         "162.159.138.232 router.discordapp.net",
         "162.159.138.232 fingerprint.discord.com",
         "162.159.138.232 remote-auth-gateway.discord.gg",
+        "34.126.226.51 dl2.discordapp.net",
+        "34.126.226.51 stable.dl2.discordapp.net",
         "51.159.197.136 wikileaks.org",
         "51.159.197.136 www.wikileaks.org",
     ];
 
     if let Ok(content) = std::fs::read_to_string(hosts_path) {
-        // Strip legacy invalid entries that break dl2 (Google Cloud) or WebRTC media
+        // Strip legacy invalid entries that break dl2 (wrong IP) or WebRTC media
         let mut cleaned_lines: Vec<String> = Vec::new();
         let mut had_bad_entries = false;
         for line in content.lines() {
             let lower = line.to_lowercase();
-            if lower.contains("dl2.discordapp.net") || lower.contains("discord.media") {
+            if lower.contains("162.159.138.232 dl2") || lower.contains("discord.media") {
                 had_bad_entries = true;
                 continue;
             }

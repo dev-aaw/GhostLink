@@ -65,28 +65,27 @@ echo [*] Servis guvenilirlik ayarlari yapilandiriliyor...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$t = Get-ScheduledTask -TaskName 'GhostLinkService'; $t.Settings.DisallowStartIfOnBatteries = $false; $t.Settings.StopIfGoingOnBatteries = $false; $t.Settings.ExecutionTimeLimit = 'PT0S'; $t.Settings.RestartCount = 999; $t.Settings.RestartInterval = 'PT1M'; $t.Settings.StartWhenAvailable = $true; Set-ScheduledTask -InputObject $t" >nul 2>&1
 
 echo [*] DNS zehirlenmesine karsi temiz IP eslemeleri yapilandiriliyor (hosts)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$h = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'; if (Test-Path $h) { $c = Get-Content $h; $out = $c | Where-Object { $_ -notmatch 'dl2.discordapp.net' -and $_ -notmatch 'discord.media' }; Set-Content -Path $h -Value $out -Encoding ascii }" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$h = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'; if (Test-Path $h) { $c = Get-Content $h; $clean = $c | Where-Object { $_ -notmatch 'GhostLink' -and $_ -notmatch '162.159.138.232' -and $_ -notmatch '34.126.226.51' -and $_ -notmatch '51.159.197.136' -and $_ -notmatch 'discord' }; Set-Content -Path $h -Value $clean -Encoding ascii }" >nul 2>&1
 
-findstr /C:"discord.com" "%WINDIR%\System32\drivers\etc\hosts" >nul 2>&1
-if %errorlevel% neq 0 (
-    echo.>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo # GhostLink Clean Hosts Mappings>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 discordapp.com>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 updates.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 discordcdn.com>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 gateway.discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 cdn.discordapp.com>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 media.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 status.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 router.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 fingerprint.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 remote-auth-gateway.discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 51.159.197.136 wikileaks.org>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 51.159.197.136 www.wikileaks.org>> "%WINDIR%\System32\drivers\etc\hosts"
-)
+echo.>> "%WINDIR%\System32\drivers\etc\hosts"
+echo # GhostLink Clean Hosts Mappings>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 discordapp.com>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 updates.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 discordcdn.com>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 gateway.discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 cdn.discordapp.com>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 media.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 status.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 router.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 fingerprint.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 162.159.138.232 remote-auth-gateway.discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 34.126.226.51 dl2.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 34.126.226.51 stable.dl2.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 51.159.197.136 wikileaks.org>> "%WINDIR%\System32\drivers\etc\hosts"
+echo 51.159.197.136 www.wikileaks.org>> "%WINDIR%\System32\drivers\etc\hosts"
 
 echo [*] Windows 11 Guvenli Sifreli DNS (Cloudflare DoH) yapilandiriliyor...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-DnsClientDohServerAddress -ServerAddress '1.1.1.1' -AutoUpgrade `$true -ErrorAction SilentlyContinue; Set-DnsClientDohServerAddress -ServerAddress '1.0.0.1' -AutoUpgrade `$true -ErrorAction SilentlyContinue; Get-NetAdapter | Where-Object { `$_.Status -eq 'Up' } | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias `$_.InterfaceAlias -ServerAddresses ('1.1.1.1', '1.0.0.1') -ErrorAction SilentlyContinue }" >nul 2>&1
