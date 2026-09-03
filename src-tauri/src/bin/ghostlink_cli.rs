@@ -46,6 +46,8 @@ enum Commands {
     },
     /// Stop the running bypass engine
     Stop,
+    /// Restart the running bypass engine
+    Restart,
     /// Display current status of GhostLink engine and privileged daemon
     Status,
     /// Manage & Synchronize with WireGuard tunnels (e.g. wg0-daily)
@@ -331,6 +333,31 @@ async fn main() -> Result<()> {
                 let mut engine = UnblockEngine::new(config);
                 engine.stop().await?;
                 println!("{}", "\n✨ GhostLink stopped and system network settings verified.".green());
+            }
+        }
+
+        Commands::Restart => {
+            println!("🔄 Restarting GhostLink Engine...");
+            if client.is_daemon_alive().await {
+                let status = client.get_status().await.ok();
+                let strat_id = status.and_then(|s| s.active_strategy_id).unwrap_or_else(|| "1".to_string());
+                let _ = client.stop().await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                match client.start(&strat_id, None, true).await {
+                    Ok(msg) => println!("✨ {}", msg.green().bold()),
+                    Err(e) => println!("❌ Restart failed: {}", e),
+                }
+            } else {
+                let mut engine = UnblockEngine::new(config);
+                let _ = engine.stop().await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                let strats = engine.list_strategies();
+                if let Some(strat) = strats.first() {
+                    match engine.start(strat).await {
+                        Ok(()) => println!("✨ Engine restarted successfully!"),
+                        Err(e) => println!("❌ Restart failed: {}", e),
+                    }
+                }
             }
         }
 
