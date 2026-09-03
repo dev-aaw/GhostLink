@@ -221,12 +221,16 @@ async fn main() -> Result<()> {
             }
         });
 
-        // 3. Resilience Watchdog & Network Transition Monitor (Wi-Fi <-> Ethernet / Sleep-Wake)
+        // 3. Resilience Watchdog & Network Transition Monitor with Crash Circuit Breaker
         let state_for_watchdog = Arc::clone(&state);
         tokio::spawn(async move {
             let mut last_adapters = ghostlink_engine::SystemProxyManager::detect_active_windows_adapters();
+            let mut consecutive_crashes = 0;
+            let mut iteration = 0u64;
+
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+                iteration += 1;
 
                 // Watchdog Check
                 let (needs_revival, strat_to_revive) = {
@@ -234,31 +238,50 @@ async fn main() -> Result<()> {
                     if st.engine.is_running() && !st.engine.check_health() {
                         (true, st.active_strategy.clone())
                     } else {
+                        consecutive_crashes = 0; // Reset crash counter if healthy
                         (false, None)
                     }
                 };
 
                 if needs_revival {
-                    if let Some(strat) = strat_to_revive {
-                        ghostlink_engine::log_warn!("Detected winws crash/stop! Reviving engine immediately with [{}]...", strat.name);
+                    consecutive_crashes += 1;
+                    if consecutive_crashes <= 3 {
+                        if let Some(strat) = strat_to_revive {
+                            ghostlink_engine::log_warn!("Detected winws crash/stop (attempt {}/3)! Reviving engine with [{}]...", consecutive_crashes, strat.name);
+                            let mut st = state_for_watchdog.lock().await;
+                            let _ = st.engine.start(&strat).await;
+                            ghostlink_engine::log_info!("winws revived with strategy [{}].", strat.name);
+                        }
+                    } else if consecutive_crashes == 4 {
+                        // Circuit Breaker: Try fallback Superonline / Turkcell strategy once
+                        ghostlink_engine::log_error!("Repeated winws crashes detected (3+). Attempting fallback to [win-superonline]...");
                         let mut st = state_for_watchdog.lock().await;
-                        let _ = st.engine.start(&strat).await;
-                        ghostlink_engine::log_info!("winws revived successfully with strategy [{}].", strat.name);
+                        let list = st.engine.list_strategies();
+                        if let Some(fallback) = list.into_iter().find(|s| s.id == "win-superonline" || s.id == "win-alt") {
+                            let _ = st.engine.start(&fallback).await;
+                            st.active_strategy = Some(fallback.clone());
+                            let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&fallback.id);
+                        }
+                    } else {
+                        // Back off heavily to prevent CPU and window flicker loops
+                        ghostlink_engine::log_warn!("Circuit breaker active: winws unstable. Waiting 30s before next health check.");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                     }
                 }
 
-                // Network Transition Check
-                let current_adapters = ghostlink_engine::SystemProxyManager::detect_active_windows_adapters();
-                if !last_adapters.is_empty() && last_adapters != current_adapters {
-                    ghostlink_engine::log_info!("Network interface change detected: {:?} -> {:?}. Reapplying clean DNS...", last_adapters, current_adapters);
-                    let _ = ghostlink_engine::silent_command("ipconfig.exe").args(["/flushdns"]).status();
-                    // Reapply clean DNS to new active adapters
-                    let _ = ghostlink_engine::silent_command("powershell.exe")
-                        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-                            "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ServerAddresses @('1.1.1.1','1.0.0.1') -ErrorAction SilentlyContinue }"])
-                        .status();
+                // Network Transition Check - only run periodically (every 30s / 6 iterations) to prevent process spawning
+                if iteration % 6 == 0 {
+                    let current_adapters = ghostlink_engine::SystemProxyManager::detect_active_windows_adapters();
+                    if !last_adapters.is_empty() && last_adapters != current_adapters {
+                        ghostlink_engine::log_info!("Network interface change detected: {:?} -> {:?}. Reapplying clean DNS...", last_adapters, current_adapters);
+                        let _ = ghostlink_engine::silent_command("ipconfig.exe").args(["/flushdns"]).status();
+                        let _ = ghostlink_engine::silent_command("powershell.exe")
+                            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                                "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ServerAddresses @('1.1.1.1','1.0.0.1') -ErrorAction SilentlyContinue }"])
+                            .status();
+                    }
+                    last_adapters = current_adapters;
                 }
-                last_adapters = current_adapters;
             }
         });
 

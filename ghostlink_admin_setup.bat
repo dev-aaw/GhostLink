@@ -22,6 +22,10 @@ taskkill /F /IM ghostlink_daemon.exe >nul 2>&1
 taskkill /F /IM winws.exe >nul 2>&1
 taskkill /F /IM Discord.exe >nul 2>&1
 taskkill /F /IM Update.exe >nul 2>&1
+net stop "WinDivert" >nul 2>&1
+net stop "WinDivert14" >nul 2>&1
+sc delete "WinDivert" >nul 2>&1
+sc delete "WinDivert14" >nul 2>&1
 timeout /t 1 /nobreak >nul
 
 echo [*] Dizinler hazirlaniyor: C:\ProgramData\GhostLink

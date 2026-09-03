@@ -71,6 +71,12 @@ impl ProcessHandle {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
             cmd.creation_flags(CREATE_NO_WINDOW);
+
+            // Clean any stale WinDivert kernel services from prior crashes/tools
+            let _ = crate::engine::silent_command("net.exe").args(["stop", "WinDivert"]).status();
+            let _ = crate::engine::silent_command("net.exe").args(["stop", "WinDivert14"]).status();
+            let _ = crate::engine::silent_command("sc.exe").args(["delete", "WinDivert"]).status();
+            let _ = crate::engine::silent_command("sc.exe").args(["delete", "WinDivert14"]).status();
         }
 
         let child = cmd.spawn()
