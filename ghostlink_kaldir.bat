@@ -7,14 +7,12 @@ echo  GhostLink DPI Bypass - Kaldirma Araci
 echo ===============================================================
 echo.
 
-:: Yonetici Yetkisi Kontrolu
+:: Yonetici Yetkisi Kontrolu ve Otomatik Yetki Alma
 net session >nul 2>&1
 if %errorLevel% neq 0 (
-    echo [!] HATA: Bu islemi gerceklestirmek icin Yonetici Yetkisi gereklidir.
-    echo [*] Lutfen bu dosyaya SAG TIKLAYIP "Yonetici olarak calistir" secenegini secin.
-    echo.
-    pause
-    exit /b 1
+    echo [*] Yonetici yetkisi isteniyor...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b
 )
 
 echo [*] GhostLink islemleri durduruluyor...

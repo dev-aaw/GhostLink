@@ -7,14 +7,12 @@ echo   GhostLink - 24/7 Service Setup (Run as Admin)
 echo ========================================================
 echo.
 
-:: Check for administrative privileges
+:: Check for administrative privileges and self-elevate automatically
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [!] HATA: Bu dosya Yonetici olarak calistirilmalidir!
-    echo [!] Lutfen dosyaya sag tiklayip 'Yonetici olarak calistir' secenegini secin.
-    echo.
-    pause
-    exit /b 1
+    echo [*] Yonetici yetkisi isteniyor...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b
 )
 
 echo [*] Gecmis gorevler, islemler ve kilitli Discord surecleri durduruluyor...
@@ -53,6 +51,11 @@ copy /Y "%BIN_SRC%\ghostlink_cli.exe" "C:\ProgramData\GhostLink\bin\ghostlink_cl
 if exist "%~dp0bin\win32" (
     if not exist "C:\ProgramData\GhostLink\bin\win32" mkdir "C:\ProgramData\GhostLink\bin\win32"
     copy /Y "%~dp0bin\win32\*.*" "C:\ProgramData\GhostLink\bin\win32\" >nul 2>&1
+)
+
+if exist "%~dp0lists" (
+    if not exist "C:\ProgramData\GhostLink\lists" mkdir "C:\ProgramData\GhostLink\lists"
+    copy /Y "%~dp0lists\*.*" "C:\ProgramData\GhostLink\lists\" >nul 2>&1
 )
 
 echo [*] GhostLink 24/7 Sistem Servisi kaydediliyor (SYSTEM Yetkisi)...
@@ -105,7 +108,13 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "GhostLink" /t R
 echo [*] Sistem Tepsisi (ghostlink_tray.exe) baslatiliyor...
 start "" "C:\ProgramData\GhostLink\bin\ghostlink_tray.exe"
 
-timeout /t 3 /nobreak >nul
+timeout /t 2 /nobreak >nul
+
+:: Discord kurulu ise temizce baslat
+if exist "%LOCALAPPDATA%\Discord\Update.exe" (
+    echo [*] Discord temiz baglantiyla baslatiliyor...
+    start "" "%LOCALAPPDATA%\Discord\Update.exe" --processStart Discord.exe
+)
 
 echo.
 echo ========================================================
