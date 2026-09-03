@@ -253,6 +253,7 @@ impl StrategyManager {
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-google.txt")),
+                format!("--hostlist-exclude={}", l("list-exclude.txt")),
             ]);
             args.extend(r4_google);
             args.push("--new".to_string());
@@ -261,6 +262,7 @@ impl StrategyManager {
             args.extend([
                 "--filter-tcp=80,443".to_string(),
                 format!("--hostlist={}", l("list-discord.txt")),
+                format!("--hostlist-exclude={}", l("list-exclude.txt")),
             ]);
             args.extend(r5_discord);
             args.push("--new".to_string());
@@ -311,6 +313,30 @@ impl StrategyManager {
                 args: build_windows_flowseal_rules(
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-pos=1,sniext+1".into(), "--dpi-desync-split-seqovl=681".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_g), "--dpi-desync-fooling=ts".into()],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
+                ),
+            },
+            Strategy {
+                id: "win-superonline".to_string(),
+                name: "Windows Superonline (Datanoack + Split2)".to_string(),
+                description: "Optimized for Turkcell Superonline DPI with datanoack fooling and fake packet injection.".to_string(),
+                platform: Platform::Windows,
+                args: build_windows_flowseal_rules(
+                    vec!["--dpi-desync=fake,split2".into(), "--dpi-desync-split-seqovl=1".into(), "--dpi-desync-fooling=datanoack".into(), "--dpi-desync-repeats=6".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=fake,split2".into(), "--dpi-desync-split-seqovl=1".into(), "--dpi-desync-fooling=datanoack".into(), "--dpi-desync-repeats=6".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
+                    vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
+                ),
+            },
+            Strategy {
+                id: "win-turktelekom".to_string(),
+                name: "Windows Turk Telekom (Badseq + Midsld)".to_string(),
+                description: "Optimized for Turk Telekom & Kablonet with badseq sequence fooling and mid-domain splitting.".to_string(),
+                platform: Platform::Windows,
+                args: build_windows_flowseal_rules(
+                    vec!["--dpi-desync=fake,multisplit".into(), "--dpi-desync-split-pos=1,midsld".into(), "--dpi-desync-fooling=badseq,md5sig".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
+                    vec!["--dpi-desync=fake,multisplit".into(), "--dpi-desync-split-pos=1,midsld".into(), "--dpi-desync-fooling=badseq,md5sig".into(), format!("--dpi-desync-fake-tls={}", tls_g)],
                     vec!["--dpi-desync=hostfakesplit".into(), "--dpi-desync-repeats=4".into(), "--dpi-desync-fooling=ts,md5sig".into(), "--dpi-desync-hostfakesplit-mod=host=ozon.ru".into()],
                     vec!["--dpi-desync=multisplit".into(), "--dpi-desync-split-seqovl=568".into(), "--dpi-desync-split-pos=1".into(), format!("--dpi-desync-split-seqovl-pattern={}", tls_4), "--dpi-desync-cutoff=n2".into()],
                 ),
