@@ -13,6 +13,7 @@ pub use engine::{
     types::{EngineConfig, EngineState, Platform, ProbeResult, ProbeRule, ProbeSummary, ProbeTier, Strategy},
     wireguard::{WireGuardManager, WireGuardState, WireGuardTunnelInfo},
     system_proxy::SystemProxyManager,
+    logging::{self, init_logger, log_msg, get_recent_log_entries},
     silent_command,
     UnblockEngine,
 };

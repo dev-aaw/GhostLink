@@ -1,6 +1,7 @@
 pub mod autostart;
 pub mod binary_manager;
 pub mod ipc;
+pub mod logging;
 pub mod notifications;
 pub mod payloads;
 pub mod probes;
@@ -31,6 +32,7 @@ pub use types::{EngineConfig, EngineState, Platform, ProbeResult, ProbeSummary, 
 pub use wireguard::{WireGuardManager, WireGuardState};
 pub use autostart::AutoStartManager;
 pub use service::ServiceManager;
+pub use logging::{init_logger, log_msg, get_recent_log_entries, Logger};
 
 pub fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
@@ -96,6 +98,11 @@ impl UnblockEngine {
         } else {
             !self.is_running()
         }
+    }
+
+    /// Return the OS process ID of the active engine process if running.
+    pub fn active_pid(&self) -> Option<u32> {
+        self.active_process.as_ref().map(|p| p.id())
     }
 
     pub fn list_strategies(&self) -> Vec<Strategy> {
@@ -229,22 +236,12 @@ impl UnblockEngine {
                 #[cfg(target_os = "windows")]
                 {
                     let _ = socks_port;
-                    // Check if winws.exe is still alive
-                    let is_winws_alive = crate::engine::silent_command("tasklist.exe")
-                        .args(["/FI", "IMAGENAME eq winws.exe", "/NH"])
-                        .output()
-                        .map(|out| {
-                            let text = String::from_utf8_lossy(&out.stdout);
-                            text.contains("winws.exe")
-                        })
-                        .unwrap_or(true);
-
-                    if !is_winws_alive && watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                        eprintln!("\n🚨 EMERGENCY WATCHDOG: winws.exe exited! Auto-restarting engine with [{}]...", strategy_name_clone);
-                        if let Ok(new_proc) = ProcessHandle::spawn(&exe_path_clone, &strategy_args_clone) {
-                            eprintln!("✨ Engine auto-recovered successfully (PID: {}).\n", new_proc.id());
-                        }
-                    }
+                    let _ = &exe_path_clone;
+                    let _ = &strategy_args_clone;
+                    let _ = &strategy_name_clone;
+                    // The daemon's external watchdog monitors health via check_health()
+                    // and handles revival properly through engine.start().
+                    // This internal loop is only needed on macOS for SOCKS port probing.
                 }
             }
         });
@@ -256,18 +253,30 @@ impl UnblockEngine {
     pub async fn stop(&mut self) -> Result<()> {
         self.watchdog_running.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        if let Some(mut proc) = self.active_process.take() {
-            println!("🛑 Stopping engine process...");
+        let active_pid = if let Some(mut proc) = self.active_process.take() {
+            let pid = proc.id();
+            println!("🛑 Stopping engine process (PID: {})...", pid);
             let _ = proc.kill();
-        }
+            Some(pid)
+        } else {
+            None
+        };
 
         let _ = self.proxy_mgr.restore_all_system_settings();
 
         #[cfg(target_os = "windows")]
         {
-            let _ = silent_command("taskkill.exe")
-                .args(["/F", "/IM", "winws.exe"])
-                .status();
+            if let Some(pid) = active_pid {
+                // Scoped termination: kill only our specific child process PID
+                let _ = silent_command("taskkill.exe")
+                    .args(["/F", "/PID", &pid.to_string()])
+                    .status();
+            } else {
+                // Fallback only if no active process handle was tracked
+                let _ = silent_command("taskkill.exe")
+                    .args(["/F", "/IM", "winws.exe"])
+                    .status();
+            }
         }
 
         self.state = EngineState::Stopped;
@@ -320,6 +329,14 @@ impl UnblockEngine {
     where
         F: FnMut(usize, usize, &Strategy, Option<&ProbeSummary>),
     {
+        // If the engine is currently running, stop it temporarily so benchmark processes
+        // don't conflict over the WinDivert kernel filter handle on Windows.
+        if self.is_running() {
+            println!("🛑 [AutoTune] Temporarily stopping active engine for conflict-free benchmarking...");
+            let _ = self.stop().await;
+            sleep(Duration::from_millis(300)).await;
+        }
+
         // Pause watchdog during auto-tune to prevent false restarts while we kill/spawn winws per strategy
         let was_watchdog_active = self.watchdog_running.load(std::sync::atomic::Ordering::SeqCst);
         if was_watchdog_active {

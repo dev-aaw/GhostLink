@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use anyhow::Context;
 #[cfg(target_os = "macos")]
@@ -162,34 +163,59 @@ impl SystemProxyManager {
     }
 
     /// Detect active physical network adapters on Windows.
+    /// Uses PowerShell Get-NetAdapter for locale-independent detection.
     pub fn detect_active_windows_adapters() -> Vec<String> {
         #[cfg(target_os = "windows")]
         {
             let mut adapters = Vec::new();
-            let output = crate::engine::silent_command("netsh.exe")
-                .args(["interface", "ipv4", "show", "interfaces"])
+
+            // Primary method: PowerShell Get-NetAdapter (locale-independent)
+            let ps_output = crate::engine::silent_command("powershell.exe")
+                .args([
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                    "-Command",
+                    "Get-NetAdapter -Physical | Where-Object {$_.Status -eq 'Up'} | Select-Object -ExpandProperty InterfaceAlias"
+                ])
                 .output();
 
-            if let Ok(out) = output {
+            if let Ok(out) = ps_output {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.contains("connected") || trimmed.contains("Bağlandı") {
-                        if let Some(name_start) = trimmed.rfind("connected") {
-                            let name = trimmed[name_start + 9..].trim();
-                            if !name.is_empty() && !name.starts_with("Loopback") && !name.starts_with("wg") {
-                                adapters.push(name.to_string());
-                            }
-                        } else if let Some(name_start) = trimmed.rfind("Bağlandı") {
-                            let name = trimmed[name_start + 8..].trim();
-                            if !name.is_empty() && !name.starts_with("Loopback") && !name.starts_with("wg") {
-                                adapters.push(name.to_string());
+                    let name = line.trim();
+                    if !name.is_empty() && !name.starts_with("Loopback") && !name.starts_with("wg") {
+                        adapters.push(name.to_string());
+                    }
+                }
+            }
+
+            // Fallback: if PowerShell failed or returned empty, try netsh with multi-locale parsing
+            if adapters.is_empty() {
+                let output = crate::engine::silent_command("netsh.exe")
+                    .args(["interface", "ipv4", "show", "interfaces"])
+                    .output();
+
+                if let Ok(out) = output {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    // Known locale keywords for "connected" status
+                    let connected_keywords = ["connected", "Bağlandı", "Verbunden", "Connecté", "Conectado", "Подключен"];
+                    for line in stdout.lines() {
+                        let trimmed = line.trim();
+                        for keyword in &connected_keywords {
+                            if trimmed.contains(keyword) {
+                                if let Some(name_start) = trimmed.rfind(keyword) {
+                                    let name = trimmed[name_start + keyword.len()..].trim();
+                                    if !name.is_empty() && !name.starts_with("Loopback") && !name.starts_with("wg") {
+                                        adapters.push(name.to_string());
+                                    }
+                                }
+                                break;
                             }
                         }
                     }
                 }
             }
 
+            // Last resort fallback
             if adapters.is_empty() {
                 adapters.push("Ethernet".to_string());
                 adapters.push("Wi-Fi".to_string());
@@ -219,15 +245,35 @@ impl SystemProxyManager {
                 adapters.push("Wi-Fi".to_string());
             }
 
+            // Validate DNS server addresses (must be valid IPs)
+            for server in servers {
+                if !server.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':') {
+                    return Err(anyhow::anyhow!("Invalid DNS server address: {}", server));
+                }
+            }
+
             println!("🌐 [Windows DNS] Configuring clean DNS on active adapters {:?} to {:?}", adapters, servers);
+
+            // Back up current DNS configuration before overwriting
+            Self::backup_dns_config(&adapters);
 
             let s_joined = servers.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(",");
 
             for adapter in &adapters {
+                // Security: Sanitize adapter name to prevent PowerShell injection
+                // Only allow alphanumeric, spaces, hyphens, underscores, dots, and parentheses
+                let safe_adapter: String = adapter.chars()
+                    .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_' || *c == '.' || *c == '(' || *c == ')')
+                    .collect();
+                if safe_adapter.is_empty() || safe_adapter.len() != adapter.len() {
+                    eprintln!("⚠️ Skipping adapter with suspicious name: {:?}", adapter);
+                    continue;
+                }
+
                 // 1. PowerShell Set-DnsClientServerAddress (InterfaceAlias and InterfaceIndex)
                 let ps_cmd = format!(
                     "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({}) -ErrorAction SilentlyContinue",
-                    adapter, s_joined
+                    safe_adapter, s_joined
                 );
                 let _ = crate::engine::silent_command("powershell.exe")
                     .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
@@ -235,12 +281,12 @@ impl SystemProxyManager {
 
                 // 2. netsh IPv4 static primary & secondary DNS fallback (with validate=no for immediate application)
                 let _ = crate::engine::silent_command("netsh.exe")
-                    .args(["interface", "ipv4", "set", "dnsservers", &format!("name={}", adapter), "source=static", &format!("address={}", servers[0]), "validate=no"])
+                    .args(["interface", "ipv4", "set", "dnsservers", &format!("name={}", safe_adapter), "source=static", &format!("address={}", servers[0]), "validate=no"])
                     .status();
 
                 for (idx, server) in servers.iter().skip(1).enumerate() {
                     let _ = crate::engine::silent_command("netsh.exe")
-                        .args(["interface", "ipv4", "add", "dnsservers", &format!("name={}", adapter), &format!("address={}", server), &format!("index={}", idx + 2), "validate=no"])
+                        .args(["interface", "ipv4", "add", "dnsservers", &format!("name={}", safe_adapter), &format!("address={}", server), &format!("index={}", idx + 2), "validate=no"])
                         .status();
                 }
             }
@@ -268,7 +314,72 @@ impl SystemProxyManager {
         Ok(())
     }
 
-    /// Reset DNS settings on all Windows adapters to DHCP (Automatic) and flush DNS cache.
+    #[cfg(target_os = "windows")]
+    fn get_dns_backup_path() -> std::path::PathBuf {
+        let pdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+        std::path::PathBuf::from(pdata).join("GhostLink").join("dns_backup.json")
+    }
+
+    /// Backup the current DNS configuration on Windows adapters before overriding.
+    #[cfg(target_os = "windows")]
+    pub fn backup_dns_config(adapters: &[String]) {
+        let backup_path = Self::get_dns_backup_path();
+        if backup_path.exists() {
+            // Do not overwrite existing backup; it holds user's true pre-GhostLink settings
+            return;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct AdapterDnsInfo {
+            adapter: String,
+            servers: Vec<String>,
+        }
+
+        let mut entries = Vec::new();
+        for adapter in adapters {
+            let safe_adapter: String = adapter.chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_' || *c == '.' || *c == '(' || *c == ')')
+                .collect();
+            if safe_adapter.is_empty() {
+                continue;
+            }
+
+            let ps_cmd = format!(
+                "(Get-DnsClientServerAddress -InterfaceAlias '{}' -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ','",
+                safe_adapter
+            );
+            if let Ok(out) = crate::engine::silent_command("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let servers: Vec<String> = if stdout.is_empty() {
+                    Vec::new()
+                } else {
+                    stdout.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                };
+                entries.push(AdapterDnsInfo {
+                    adapter: safe_adapter,
+                    servers,
+                });
+            }
+        }
+
+        if !entries.is_empty() {
+            if let Some(parent) = backup_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(&entries) {
+                let _ = std::fs::write(&backup_path, json);
+                println!("💾 [Windows DNS] Original DNS configuration backed up to {:?}", backup_path);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn backup_dns_config(_adapters: &[String]) {}
+
+    /// Reset DNS settings on all Windows adapters (restoring backup if present, otherwise DHCP) and flush DNS cache.
     pub fn reset_windows_dns() -> Result<()> {
         #[cfg(target_os = "windows")]
         {
@@ -280,27 +391,93 @@ impl SystemProxyManager {
                 adapters.push("Wi-Fi".to_string());
             }
 
-            println!("🌐 [Windows DNS] Resetting DNS on adapters {:?} to DHCP (Automatic)...", adapters);
+            let backup_path = Self::get_dns_backup_path();
+            let mut restored_from_backup = false;
 
-            for adapter in &adapters {
-                // 1. PowerShell Set-DnsClientServerAddress reset
-                let ps_cmd = format!("Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses -ErrorAction SilentlyContinue", adapter);
-                let _ = crate::engine::silent_command("powershell.exe")
-                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
-                    .status();
-
-                // 2. netsh IPv4 DHCP reset
-                let _ = crate::engine::silent_command("netsh.exe")
-                    .args(["interface", "ipv4", "set", "dnsservers", &format!("name={}", adapter), "source=dhcp"])
-                    .status();
-
-                // 3. netsh IPv6 DHCP reset
-                let _ = crate::engine::silent_command("netsh.exe")
-                    .args(["interface", "ipv6", "set", "dnsservers", &format!("name={}", adapter), "source=dhcp"])
-                    .status();
+            #[derive(Serialize, Deserialize)]
+            struct AdapterDnsInfo {
+                adapter: String,
+                servers: Vec<String>,
             }
 
-            // 4. Flush DNS Resolver Cache
+            if backup_path.exists() {
+                if let Ok(data) = std::fs::read_to_string(&backup_path) {
+                    if let Ok(entries) = serde_json::from_str::<Vec<AdapterDnsInfo>>(&data) {
+                        println!("🌐 [Windows DNS] Restoring original DNS configuration from backup...");
+                        for entry in entries {
+                            let safe_adapter: String = entry.adapter.chars()
+                                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_' || *c == '.' || *c == '(' || *c == ')')
+                                .collect();
+                            if safe_adapter.is_empty() {
+                                continue;
+                            }
+
+                            if entry.servers.is_empty() {
+                                // Original was DHCP
+                                let ps_cmd = format!("Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses -ErrorAction SilentlyContinue", safe_adapter);
+                                let _ = crate::engine::silent_command("powershell.exe")
+                                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+                                    .status();
+                                let _ = crate::engine::silent_command("netsh.exe")
+                                    .args(["interface", "ipv4", "set", "dnsservers", &format!("name={}", safe_adapter), "source=dhcp"])
+                                    .status();
+                            } else {
+                                // Restore original static servers
+                                let s_joined = entry.servers.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(",");
+                                let ps_cmd = format!(
+                                    "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({}) -ErrorAction SilentlyContinue",
+                                    safe_adapter, s_joined
+                                );
+                                let _ = crate::engine::silent_command("powershell.exe")
+                                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+                                    .status();
+
+                                let _ = crate::engine::silent_command("netsh.exe")
+                                    .args(["interface", "ipv4", "set", "dnsservers", &format!("name={}", safe_adapter), "source=static", &format!("address={}", entry.servers[0]), "validate=no"])
+                                    .status();
+                                for (idx, server) in entry.servers.iter().skip(1).enumerate() {
+                                    let _ = crate::engine::silent_command("netsh.exe")
+                                        .args(["interface", "ipv4", "add", "dnsservers", &format!("name={}", safe_adapter), &format!("address={}", server), &format!("index={}", idx + 2), "validate=no"])
+                                        .status();
+                                }
+                            }
+                        }
+                        restored_from_backup = true;
+                    }
+                }
+                let _ = std::fs::remove_file(&backup_path);
+            }
+
+            if !restored_from_backup {
+                println!("🌐 [Windows DNS] Resetting DNS on adapters {:?} to DHCP (Automatic)...", adapters);
+
+                for adapter in &adapters {
+                    let safe_adapter: String = adapter.chars()
+                        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_' || *c == '.' || *c == '(' || *c == ')')
+                        .collect();
+                    if safe_adapter.is_empty() {
+                        continue;
+                    }
+
+                    // 1. PowerShell Set-DnsClientServerAddress reset
+                    let ps_cmd = format!("Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses -ErrorAction SilentlyContinue", safe_adapter);
+                    let _ = crate::engine::silent_command("powershell.exe")
+                        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+                        .status();
+
+                    // 2. netsh IPv4 DHCP reset
+                    let _ = crate::engine::silent_command("netsh.exe")
+                        .args(["interface", "ipv4", "set", "dnsservers", &format!("name={}", safe_adapter), "source=dhcp"])
+                        .status();
+
+                    // 3. netsh IPv6 DHCP reset
+                    let _ = crate::engine::silent_command("netsh.exe")
+                        .args(["interface", "ipv6", "set", "dnsservers", &format!("name={}", safe_adapter), "source=dhcp"])
+                        .status();
+                }
+            }
+
+            // Flush DNS Resolver Cache
             let _ = crate::engine::silent_command("ipconfig.exe")
                 .args(["/flushdns"])
                 .status();
@@ -308,7 +485,7 @@ impl SystemProxyManager {
                 .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Clear-DnsClientCache -ErrorAction SilentlyContinue"])
                 .status();
 
-            println!("✨ [Windows DNS] DNS reset to DHCP and cache flushed successfully.");
+            println!("✨ [Windows DNS] DNS reset/restored and cache flushed successfully.");
         }
         Ok(())
     }

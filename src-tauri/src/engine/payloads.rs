@@ -133,8 +133,10 @@ pub fn generate_fake_stun() -> Vec<u8> {
 pub fn ensure_payload_files(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir)?;
 
-    let files: [(&str, Box<dyn Fn() -> Vec<u8>>); 4] = [
+    let files: [(&str, Box<dyn Fn() -> Vec<u8>>); 6] = [
         ("quic_initial_www_google_com.bin", Box::new(generate_fake_quic_initial)),
+        ("quic_initial_dbankcloud_ru.bin", Box::new(generate_fake_quic_initial)),
+        ("stun.bin", Box::new(generate_fake_stun)),
         ("tls_clienthello_www_google_com.bin", Box::new(|| generate_fake_tls_client_hello("www.google.com"))),
         ("tls_clienthello_4pda_to.bin", Box::new(|| generate_fake_tls_client_hello("4pda.to"))),
         ("tls_clienthello_max_ru.bin", Box::new(|| generate_fake_tls_client_hello("max.ru"))),

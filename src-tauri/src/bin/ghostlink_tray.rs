@@ -163,6 +163,7 @@ mod windows_tray {
     }
 
     pub fn run_tray() -> Result<()> {
+        ghostlink_engine::init_logger("tray");
         println!("===============================================================");
         println!(" 👻 GhostLink System Tray (Production 24/7 Engine Active)");
         println!("===============================================================");
@@ -186,10 +187,7 @@ mod windows_tray {
         let initial_wg_state = WireGuardManager::status(&detected_wg) == WireGuardState::Connected;
         println!("🚀 [Init] Strategy: '{}' | WireGuard Tunnel: '{}' (Connected: {})", default_strat_name, detected_wg, initial_wg_state);
 
-        // Auto-register start on login
-        if let Ok(exe_path) = std::env::current_exe() {
-            let _ = AutoStartManager::enable(&exe_path);
-        }
+        // Auto-register start on login removed as per request
 
         let state = Arc::new(Mutex::new(TrayState {
             is_gl_running: false,
@@ -317,6 +315,7 @@ mod windows_tray {
             }
 
             Shell_NotifyIconW(NIM_DELETE, &nid);
+            DestroyIcon(ghost_icon);
         }
 
         Ok(())
@@ -646,20 +645,26 @@ mod windows_tray {
                 });
             }
             ID_AUTOSTART_TOGGLE => {
-                if let Ok(exe_path) = std::env::current_exe() {
-                    let _ = AutoStartManager::toggle(&exe_path);
-                    let enabled = AutoStartManager::is_enabled();
-                    notify(
-                        "GhostLink",
-                        if enabled { "Start at Login: ENABLED" } else { "Start at Login: DISABLED" },
-                    );
-                }
+                handle.spawn(async move {
+                    if let Ok(exe_path) = std::env::current_exe() {
+                        let _ = AutoStartManager::toggle(&exe_path);
+                        let enabled = AutoStartManager::is_enabled();
+                        notify(
+                            "GhostLink",
+                            if enabled { "Start at Login: ENABLED" } else { "Start at Login: DISABLED" },
+                        );
+                    }
+                });
             }
             ID_QUIT => {
                 println!("🚪 [Tray] Stopping GhostLink Engine & Exiting Tray...");
                 let hwnd_raw = hwnd as usize;
                 handle.spawn(async move {
-                    let _ = client.stop().await;
+                    // Give daemon 5 seconds to respond, then force quit
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        client.stop()
+                    ).await;
                     unsafe {
                         PostMessageW(hwnd_raw as HWND, WM_CLOSE, 0, 0);
                     }

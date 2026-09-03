@@ -19,7 +19,9 @@ impl StrategyManager {
 
         let write_list = |filename: &str, content: &str| -> Result<()> {
             let path = self.lists_dir.join(filename);
-            fs::write(path, content)?;
+            if !path.exists() {
+                fs::write(&path, content)?;
+            }
             Ok(())
         };
 
@@ -219,8 +221,8 @@ impl StrategyManager {
         let stun = q("stun.bin");
 
         let wf_full = vec![
-            "--wf-tcp=80,443,2053,2083,2087,2096,8443".to_string(),
-            "--wf-udp=443,19294-19344,50000-50100".to_string(),
+            "--wf-tcp=80,443".to_string(),
+            "--wf-udp=443,19294-19344,50000-65535".to_string(),
         ];
 
         // Flowseal official multi-rule builder
@@ -238,25 +240,12 @@ impl StrategyManager {
             ]);
             // Rule 2: UDP Discord Voice (STUN & WebRTC)
             args.extend([
-                "--filter-udp=19294-19344,50000-50100".to_string(),
+                "--filter-udp=19294-19344,50000-65535".to_string(),
                 "--filter-l7=discord,stun".to_string(),
                 "--dpi-desync=fake".to_string(),
-                format!("--dpi-desync-fake-discord={}", quic_d),
                 format!("--dpi-desync-fake-stun={}", stun),
-                "--dpi-desync-repeats=6".to_string(),
+                "--dpi-desync-repeats=2".to_string(),
                 "--dpi-desync-cutoff=d3".to_string(),
-                "--new".to_string(),
-            ]);
-            // Rule 3: Discord Media TCP
-            args.extend([
-                "--filter-tcp=2053,2083,2087,2096,8443".to_string(),
-                "--hostlist-domains=discord.media".to_string(),
-                "--dpi-desync=fake,split2".to_string(),
-                "--dpi-desync-split-seqovl=1".to_string(),
-                "--dpi-desync-split-tls=sniext".to_string(),
-                format!("--dpi-desync-fake-tls={}", tls_g),
-                "--dpi-desync-fooling=ts".to_string(),
-                "--dpi-desync-repeats=6".to_string(),
                 "--new".to_string(),
             ]);
 
@@ -300,7 +289,7 @@ impl StrategyManager {
 
             // Rule 8: UDP Game / Catch-All
             args.extend([
-                "--filter-udp=12".to_string(),
+                "--filter-udp=12-65535".to_string(),
                 format!("--ipset={}", l("ipset-all.txt")),
                 format!("--ipset-exclude={}", l("ipset-exclude.txt")),
                 "--dpi-desync=fake".to_string(),

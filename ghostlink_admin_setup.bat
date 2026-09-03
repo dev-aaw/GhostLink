@@ -24,11 +24,20 @@ taskkill /F /IM ghostlink_daemon.exe >nul 2>&1
 taskkill /F /IM winws.exe >nul 2>&1
 taskkill /F /IM Discord.exe >nul 2>&1
 taskkill /F /IM Update.exe >nul 2>&1
+timeout /t 1 /nobreak >nul
 
 echo [*] Dizinler hazirlaniyor: C:\ProgramData\GhostLink
 if not exist "C:\ProgramData\GhostLink\bin" mkdir "C:\ProgramData\GhostLink\bin"
 if not exist "C:\ProgramData\GhostLink\lists" mkdir "C:\ProgramData\GhostLink\lists"
 if not exist "C:\ProgramData\GhostLink\logs" mkdir "C:\ProgramData\GhostLink\logs"
+echo [*] Dizin guvenlik izinleri ayarlaniyor (ACL kilitleme)...
+icacls "C:\ProgramData\GhostLink" /inheritance:r /grant:r "SYSTEM":(OI)(CI)F /grant:r "Administrators":(OI)(CI)F /grant:r "Users":(OI)(CI)RX >nul 2>&1
+
+if not exist "%~dp0src-tauri\target\release\ghostlink_daemon.exe" (
+    echo [!] HATA: Release dosyalari bulunamadi! Lutfen once derleyin.
+    pause
+    exit /b 1
+)
 
 echo [*] En son surum ikilileri kopyalaniyor...
 copy /Y "%~dp0src-tauri\target\release\ghostlink_daemon.exe" "C:\ProgramData\GhostLink\bin\ghostlink_daemon.exe"

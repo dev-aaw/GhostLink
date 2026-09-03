@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use ghostlink_engine::engine::ipc::{
-    DaemonStatusInfo, IpcRequest, IpcResponse, WINDOWS_IPC_ADDR,
+    DaemonStatusInfo, IpcEnvelope, IpcRequest, IpcResponse, WINDOWS_IPC_ADDR,
 };
 #[cfg(unix)]
 use ghostlink_engine::engine::ipc::{DEFAULT_SOCKET_PATH, FALLBACK_SOCKET_PATH};
@@ -11,7 +11,7 @@ use ghostlink_engine::{EngineConfig, EngineState, ProbeRunner, Strategy, Unblock
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 #[cfg(unix)]
@@ -34,6 +34,7 @@ struct DaemonState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    ghostlink_engine::init_logger("daemon");
     println!("👻 GhostLink Privileged Helper Daemon starting...");
 
     #[cfg(unix)]
@@ -159,8 +160,18 @@ async fn main() -> Result<()> {
             use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
             unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> windows_sys::Win32::Foundation::BOOL {
                 let _ = ctrl_type;
+                // Kill winws process
                 let _ = ghostlink_engine::silent_command("taskkill.exe")
                     .args(["/F", "/IM", "winws.exe"])
+                    .status();
+                // Reset DNS to DHCP on all adapters
+                let _ = ghostlink_engine::silent_command("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                        "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ResetServerAddresses -ErrorAction SilentlyContinue }"])
+                    .status();
+                // Flush DNS cache
+                let _ = ghostlink_engine::silent_command("ipconfig.exe")
+                    .args(["/flushdns"])
                     .status();
                 1
             }
@@ -229,18 +240,23 @@ async fn main() -> Result<()> {
 
                 if needs_revival {
                     if let Some(strat) = strat_to_revive {
-                        eprintln!("⚠️ [Watchdog] Detected winws crash/stop! Reviving engine immediately...");
+                        ghostlink_engine::log_warn!("Detected winws crash/stop! Reviving engine immediately with [{}]...", strat.name);
                         let mut st = state_for_watchdog.lock().await;
                         let _ = st.engine.start(&strat).await;
-                        println!("✨ [Watchdog] winws revived successfully with strategy [{}].", strat.name);
+                        ghostlink_engine::log_info!("winws revived successfully with strategy [{}].", strat.name);
                     }
                 }
 
                 // Network Transition Check
                 let current_adapters = ghostlink_engine::SystemProxyManager::detect_active_windows_adapters();
                 if !last_adapters.is_empty() && last_adapters != current_adapters {
-                    println!("🌐 [Network Transition] Network interface change detected: {:?} -> {:?}", last_adapters, current_adapters);
+                    ghostlink_engine::log_info!("Network interface change detected: {:?} -> {:?}. Reapplying clean DNS...", last_adapters, current_adapters);
                     let _ = ghostlink_engine::silent_command("ipconfig.exe").args(["/flushdns"]).status();
+                    // Reapply clean DNS to new active adapters
+                    let _ = ghostlink_engine::silent_command("powershell.exe")
+                        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                            "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ServerAddresses @('1.1.1.1','1.0.0.1') -ErrorAction SilentlyContinue }"])
+                        .status();
                 }
                 last_adapters = current_adapters;
             }
@@ -322,11 +338,23 @@ async fn handle_tcp_connection(stream: TcpStream, state: Arc<Mutex<DaemonState>>
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
+    let expected_token = get_or_create_daemon_token();
 
-    while reader.read_line(&mut line).await? > 0 {
-        if line.len() > 65536 {
+    loop {
+        line.clear();
+        // Slowloris & OOM protection: take at most 65536 bytes per request line
+        let bytes_read = {
+            let mut limited_reader = (&mut reader).take(65536);
+            limited_reader.read_line(&mut line).await?
+        };
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        if bytes_read >= 65536 && !line.ends_with('\n') {
             let err_resp = IpcResponse::Error {
-                error: "Payload too large (exceeds 64KB limit)".to_string(),
+                error: "Payload too large (exceeds 64KB limit without newline)".to_string(),
             };
             let mut out = serde_json::to_string(&err_resp)?;
             out.push('\n');
@@ -337,32 +365,44 @@ async fn handle_tcp_connection(stream: TcpStream, state: Arc<Mutex<DaemonState>>
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            line.clear();
             continue;
         }
 
-        let request: IpcRequest = match serde_json::from_str(trimmed) {
-            Ok(req) => req,
-            Err(e) => {
+        let (req_token, request) = if let Ok(envelope) = serde_json::from_str::<IpcEnvelope>(trimmed) {
+            (envelope.token, envelope.request)
+        } else if let Ok(req) = serde_json::from_str::<IpcRequest>(trimmed) {
+            (None, req)
+        } else {
+            let err_resp = IpcResponse::Error {
+                error: "Invalid JSON request".to_string(),
+            };
+            let mut out = serde_json::to_string(&err_resp)?;
+            out.push('\n');
+            writer.write_all(out.as_bytes()).await?;
+            writer.flush().await?;
+            continue;
+        };
+
+        // Authentication verification
+        if !matches!(request, IpcRequest::Ping) {
+            if req_token.as_deref() != Some(&expected_token) {
+                eprintln!("🚨 [IPC SECURITY] Rejected unauthenticated request from loopback client!");
                 let err_resp = IpcResponse::Error {
-                    error: format!("Invalid JSON request: {}", e),
+                    error: "Unauthorized: Invalid or missing IPC authentication token".to_string(),
                 };
                 let mut out = serde_json::to_string(&err_resp)?;
                 out.push('\n');
                 writer.write_all(out.as_bytes()).await?;
                 writer.flush().await?;
-                line.clear();
                 continue;
             }
-        };
+        }
 
         let response = process_ipc_request(request, &state).await;
         let mut out = serde_json::to_string(&response)?;
         out.push('\n');
         writer.write_all(out.as_bytes()).await?;
         writer.flush().await?;
-
-        line.clear();
     }
 
     Ok(())
@@ -405,7 +445,7 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
                 active_strategy_id: strat_id,
                 active_strategy_name: strat_name,
                 socks_port,
-                engine_pid: None,
+                engine_pid: st.engine.active_pid(),
                 daemon_pid: std::process::id(),
                 is_root,
                 uptime_secs: uptime,
@@ -423,13 +463,13 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
                     match st.engine.start(&strat).await {
                         Ok(()) => {
                             st.active_strategy = Some(strat.clone());
-                            println!("🚀 [Daemon] GhostLink engine started with strategy: {}", strat.name);
+                            ghostlink_engine::log_info!("GhostLink engine started with strategy: [{}]", strat.name);
                             IpcResponse::Ok {
                                 message: format!("Engine started successfully with strategy [{}]", strat.name),
                             }
                         }
                         Err(e) => {
-                            eprintln!("❌ [Daemon] Failed to start engine: {}", e);
+                            ghostlink_engine::log_error!("Failed to start engine: {}", e);
                             IpcResponse::Error {
                                 error: format!("Failed to start engine: {}", e),
                             }
@@ -447,7 +487,7 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
             match st.engine.stop().await {
                 Ok(()) => {
                     st.active_strategy = None;
-                    println!("🛑 [Daemon] GhostLink engine stopped and system settings restored.");
+                    ghostlink_engine::log_info!("GhostLink engine stopped and system settings restored.");
                     IpcResponse::Ok {
                         message: "Engine stopped and system settings restored".to_string(),
                     }
@@ -703,6 +743,12 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
             }
         }
 
+        IpcRequest::GetRecentLogs { max_lines } => {
+            let count = max_lines.unwrap_or(50);
+            let logs = ghostlink_engine::logging::get_recent_log_entries(count);
+            IpcResponse::RecentLogs(logs)
+        }
+
         IpcRequest::ShutdownDaemon => {
             let mut st = state.lock().await;
             let _ = st.engine.stop().await;
@@ -751,6 +797,39 @@ fn is_windows_admin() -> bool {
 }
 
 #[cfg(windows)]
+fn get_or_create_daemon_token() -> String {
+    use rand::RngCore;
+    let token_path = ghostlink_engine::engine::ipc::get_token_path();
+    if let Ok(existing) = std::fs::read_to_string(&token_path) {
+        let trimmed = existing.trim().to_string();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let token = hex::encode(bytes);
+
+    if let Some(parent) = token_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&token_path, &token);
+
+    let _ = ghostlink_engine::silent_command("icacls.exe")
+        .args([
+            token_path.to_str().unwrap_or(""),
+            "/inheritance:r",
+            "/grant:r", "SYSTEM:(F)",
+            "/grant:r", "Administrators:(F)",
+            "/grant:r", "Users:(R)",
+        ])
+        .status();
+
+    token
+}
+
+#[cfg(windows)]
 fn ensure_clean_hosts() {
     let hosts_path = r"C:\Windows\System32\drivers\etc\hosts";
     let entries = [
@@ -775,9 +854,24 @@ fn ensure_clean_hosts() {
     if let Ok(content) = std::fs::read_to_string(hosts_path) {
         let mut new_content = content.clone();
         let mut modified = false;
+        let existing_lines: Vec<&str> = content.lines().collect();
+
         for entry in &entries {
             let domain = entry.split_whitespace().nth(1).unwrap_or("");
-            if !domain.is_empty() && !content.contains(domain) {
+            if domain.is_empty() {
+                continue;
+            }
+
+            // Word-boundary check: exact domain match on active non-comment lines
+            let already_present = existing_lines.iter().any(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with('#') {
+                    return false;
+                }
+                trimmed.split_whitespace().skip(1).any(|host| host.eq_ignore_ascii_case(domain))
+            });
+
+            if !already_present {
                 if !new_content.ends_with('\n') && !new_content.is_empty() {
                     new_content.push('\n');
                 }

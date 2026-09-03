@@ -22,6 +22,26 @@ pub fn get_socket_path() -> PathBuf {
     var_run.to_path_buf()
 }
 
+/// Returns the path to the daemon authentication secret token.
+pub fn get_token_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let pdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+        PathBuf::from(pdata).join("GhostLink").join(".daemon_token")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from("/var/run/ghostlink.token")
+    }
+}
+
+/// Wrapper envelope to authenticate IPC requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcEnvelope {
+    pub token: Option<String>,
+    pub request: IpcRequest,
+}
+
 /// Commands that client (CLI / GUI) sends to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
@@ -66,6 +86,9 @@ pub enum IpcRequest {
         router: String,
         iface: String,
     },
+    GetRecentLogs {
+        max_lines: Option<usize>,
+    },
     ShutdownDaemon,
 }
 
@@ -92,6 +115,7 @@ pub enum IpcResponse {
         tunnel: String,
         state: crate::engine::wireguard::WireGuardState,
     },
+    RecentLogs(Vec<String>),
     Error {
         error: String,
     },
@@ -113,6 +137,7 @@ pub struct DaemonStatusInfo {
 pub struct DaemonClient {
     #[allow(dead_code)]
     socket_path: PathBuf,
+    token: Option<String>,
 }
 
 impl Default for DaemonClient {
@@ -123,7 +148,11 @@ impl Default for DaemonClient {
 
 impl DaemonClient {
     pub fn new(socket_path: PathBuf) -> Self {
-        Self { socket_path }
+        let token = std::fs::read_to_string(get_token_path())
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        Self { socket_path, token }
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -138,6 +167,18 @@ impl DaemonClient {
     }
 
     pub async fn send_request(&self, request: &IpcRequest) -> Result<IpcResponse> {
+        // Wrap entire IPC communication in a 10-second timeout to prevent
+        // indefinite hangs if daemon is unresponsive or deadlocked
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.send_request_inner(request),
+        ).await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!("IPC request timed out after 10 seconds (daemon may be unresponsive)")),
+        }
+    }
+
+    async fn send_request_inner(&self, request: &IpcRequest) -> Result<IpcResponse> {
         #[cfg(unix)]
         let (reader, mut writer) = {
             let stream = tokio::net::UnixStream::connect(&self.socket_path)
@@ -156,7 +197,20 @@ impl DaemonClient {
 
         let mut reader = BufReader::new(reader);
 
-        let mut req_str = serde_json::to_string(request)?;
+        // Always wrap request in authenticated envelope
+        let token_val = self.token.clone().or_else(|| {
+            std::fs::read_to_string(get_token_path())
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+
+        let envelope = IpcEnvelope {
+            token: token_val,
+            request: request.clone(),
+        };
+
+        let mut req_str = serde_json::to_string(&envelope)?;
         req_str.push('\n');
 
         writer.write_all(req_str.as_bytes()).await?;
@@ -321,6 +375,14 @@ impl DaemonClient {
         match self.send_request(&req).await? {
             IpcResponse::Ok { message } => Ok(message),
             other => Err(anyhow!("Unexpected response to DeleteRoute: {:?}", other)),
+        }
+    }
+
+    pub async fn get_recent_logs(&self, max_lines: Option<usize>) -> Result<Vec<String>> {
+        let req = IpcRequest::GetRecentLogs { max_lines };
+        match self.send_request(&req).await? {
+            IpcResponse::RecentLogs(lines) => Ok(lines),
+            other => Err(anyhow!("Unexpected response to GetRecentLogs: {:?}", other)),
         }
     }
 }
