@@ -184,35 +184,57 @@ async fn main() -> Result<()> {
         }
 
         Commands::Autotune => {
-            let mut engine = UnblockEngine::new(config);
             println!("\n🔄 Starting GhostLink Auto-tune Strategy Benchmark...\n");
 
-            let best_strategy = engine.auto_tune(|curr, total, strat, maybe_summary| {
-                match maybe_summary {
-                    None => {
-                        println!("👉 [{}/{}] Probing strategy: {}...", curr, total, strat.name.yellow());
+            if client.is_daemon_alive().await {
+                match client.auto_tune().await {
+                    Ok((Some(strat), latency)) => {
+                        println!("\n---------------------------------------------------------");
+                        println!("🏆 {} Recommended Working Strategy: {}", "SUCCESS:".bold().green(), strat.name.bold().green());
+                        if let Some(lat) = latency {
+                            println!("⚡ Total Latency: {}ms", lat);
+                        }
+                        println!("🚀 Automatically applied and active in GhostLink Daemon!");
+                        println!("---------------------------------------------------------\n");
                     }
-                    Some(summary) => {
-                        if summary.success {
-                            println!("   {} Passed! Latency: {}ms", "✔".green().bold(), summary.total_latency_ms);
-                        } else {
-                            println!("   {} Failed (blocked or timeout)", "✖".red());
+                    Ok((None, _)) => {
+                        println!("\n---------------------------------------------------------");
+                        println!("❌ {} No working strategy found among all candidates for current ISP.", "FAILED:".bold().red());
+                        println!("---------------------------------------------------------\n");
+                    }
+                    Err(e) => {
+                        println!("❌ AutoTune error: {}", e);
+                    }
+                }
+            } else {
+                let mut engine = UnblockEngine::new(config);
+                let best_strategy = engine.auto_tune(|curr, total, strat, maybe_summary| {
+                    match maybe_summary {
+                        None => {
+                            println!("👉 [{}/{}] Probing strategy: {}...", curr, total, strat.name.yellow());
+                        }
+                        Some(summary) => {
+                            if summary.success {
+                                println!("   {} Passed! Latency: {}ms", "✔".green().bold(), summary.total_latency_ms);
+                            } else {
+                                println!("   {} Failed (blocked or timeout)", "✖".red());
+                            }
                         }
                     }
-                }
-            }).await?;
+                }).await?;
 
-            println!("\n---------------------------------------------------------");
-            match best_strategy {
-                Some(strat) => {
-                    println!("🏆 {} Recommended Working Strategy: {}", "SUCCESS:".bold().green(), strat.name.bold().green());
-                    println!("💡 You can start it using: cargo run --bin ghostlink_cli -- start -s {}", strat.id);
+                println!("\n---------------------------------------------------------");
+                match best_strategy {
+                    Some(strat) => {
+                        println!("🏆 {} Recommended Working Strategy: {}", "SUCCESS:".bold().green(), strat.name.bold().green());
+                        println!("💡 You can start it using: ghostlink_cli start -s {}", strat.id);
+                    }
+                    None => {
+                        println!("❌ {} No working strategy found among all candidates for current ISP.", "FAILED:".bold().red());
+                    }
                 }
-                None => {
-                    println!("❌ {} No working strategy found among all candidates for current ISP.", "FAILED:".bold().red());
-                }
+                println!("---------------------------------------------------------\n");
             }
-            println!("---------------------------------------------------------\n");
         }
 
         Commands::Status => {
