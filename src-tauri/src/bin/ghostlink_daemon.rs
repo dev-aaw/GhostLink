@@ -838,15 +838,11 @@ fn ensure_clean_hosts() {
         "162.159.138.232 discordapp.com",
         "162.159.138.232 discordapp.net",
         "162.159.138.232 updates.discord.com",
-        "162.159.138.232 dl2.discordapp.net",
-        "162.159.138.232 stable.dl2.discordapp.net",
-        "162.159.138.232 discord.media",
         "162.159.138.232 discordcdn.com",
         "162.159.138.232 gateway.discord.gg",
         "162.159.138.232 cdn.discordapp.com",
         "162.159.138.232 media.discordapp.net",
         "162.159.138.232 status.discord.com",
-        "162.159.138.232 latency.discord.media",
         "162.159.138.232 router.discordapp.net",
         "162.159.138.232 fingerprint.discord.com",
         "162.159.138.232 remote-auth-gateway.discord.gg",
@@ -855,9 +851,21 @@ fn ensure_clean_hosts() {
     ];
 
     if let Ok(content) = std::fs::read_to_string(hosts_path) {
-        let mut new_content = content.clone();
-        let mut modified = false;
-        let existing_lines: Vec<&str> = content.lines().collect();
+        // Strip legacy invalid entries that break dl2 (Google Cloud) or WebRTC media
+        let mut cleaned_lines: Vec<String> = Vec::new();
+        let mut had_bad_entries = false;
+        for line in content.lines() {
+            let lower = line.to_lowercase();
+            if lower.contains("dl2.discordapp.net") || lower.contains("discord.media") {
+                had_bad_entries = true;
+                continue;
+            }
+            cleaned_lines.push(line.to_string());
+        }
+
+        let mut new_content = cleaned_lines.join("\r\n");
+        let mut modified = had_bad_entries;
+        let existing_lines: Vec<String> = cleaned_lines.clone();
 
         for entry in &entries {
             let domain = entry.split_whitespace().nth(1).unwrap_or("");

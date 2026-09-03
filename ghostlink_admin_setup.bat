@@ -65,6 +65,8 @@ echo [*] Servis guvenilirlik ayarlari yapilandiriliyor...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$t = Get-ScheduledTask -TaskName 'GhostLinkService'; $t.Settings.DisallowStartIfOnBatteries = $false; $t.Settings.StopIfGoingOnBatteries = $false; $t.Settings.ExecutionTimeLimit = 'PT0S'; $t.Settings.RestartCount = 999; $t.Settings.RestartInterval = 'PT1M'; $t.Settings.StartWhenAvailable = $true; Set-ScheduledTask -InputObject $t" >nul 2>&1
 
 echo [*] DNS zehirlenmesine karsi temiz IP eslemeleri yapilandiriliyor (hosts)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$h = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'; if (Test-Path $h) { $c = Get-Content $h; $out = $c | Where-Object { $_ -notmatch 'dl2.discordapp.net' -and $_ -notmatch 'discord.media' }; Set-Content -Path $h -Value $out -Encoding ascii }" >nul 2>&1
+
 findstr /C:"discord.com" "%WINDIR%\System32\drivers\etc\hosts" >nul 2>&1
 if %errorlevel% neq 0 (
     echo.>> "%WINDIR%\System32\drivers\etc\hosts"
@@ -74,15 +76,11 @@ if %errorlevel% neq 0 (
     echo 162.159.138.232 discordapp.com>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 updates.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 dl2.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 stable.dl2.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 discord.media>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 discordcdn.com>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 gateway.discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 cdn.discordapp.com>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 media.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 status.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
-    echo 162.159.138.232 latency.discord.media>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 router.discordapp.net>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 fingerprint.discord.com>> "%WINDIR%\System32\drivers\etc\hosts"
     echo 162.159.138.232 remote-auth-gateway.discord.gg>> "%WINDIR%\System32\drivers\etc\hosts"
