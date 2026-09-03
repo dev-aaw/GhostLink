@@ -33,16 +33,27 @@ if not exist "C:\ProgramData\GhostLink\logs" mkdir "C:\ProgramData\GhostLink\log
 echo [*] Dizin guvenlik izinleri ayarlaniyor (ACL kilitleme)...
 icacls "C:\ProgramData\GhostLink" /inheritance:r /grant:r "SYSTEM":(OI)(CI)F /grant:r "Administrators":(OI)(CI)F /grant:r "Users":(OI)(CI)RX >nul 2>&1
 
-if not exist "%~dp0src-tauri\target\release\ghostlink_daemon.exe" (
-    echo [!] HATA: Release dosyalari bulunamadi! Lutfen once derleyin.
+set "BIN_SRC="
+if exist "%~dp0bin\ghostlink_daemon.exe" (
+    set "BIN_SRC=%~dp0bin"
+) else if exist "%~dp0src-tauri\target\release\ghostlink_daemon.exe" (
+    set "BIN_SRC=%~dp0src-tauri\target\release"
+) else (
+    echo [!] HATA: GhostLink calistirilabilir dosyalari bulunamadi!
+    echo [*] Lutfen zip icindeki tum dosyalari bir klasore cikardiginizdan emin olun.
     pause
     exit /b 1
 )
 
 echo [*] En son surum ikilileri kopyalaniyor...
-copy /Y "%~dp0src-tauri\target\release\ghostlink_daemon.exe" "C:\ProgramData\GhostLink\bin\ghostlink_daemon.exe"
-copy /Y "%~dp0src-tauri\target\release\ghostlink_tray.exe" "C:\ProgramData\GhostLink\bin\ghostlink_tray.exe"
-copy /Y "%~dp0src-tauri\target\release\ghostlink_cli.exe" "C:\ProgramData\GhostLink\bin\ghostlink_cli.exe"
+copy /Y "%BIN_SRC%\ghostlink_daemon.exe" "C:\ProgramData\GhostLink\bin\ghostlink_daemon.exe"
+copy /Y "%BIN_SRC%\ghostlink_tray.exe" "C:\ProgramData\GhostLink\bin\ghostlink_tray.exe"
+copy /Y "%BIN_SRC%\ghostlink_cli.exe" "C:\ProgramData\GhostLink\bin\ghostlink_cli.exe"
+
+if exist "%~dp0bin\win32" (
+    if not exist "C:\ProgramData\GhostLink\bin\win32" mkdir "C:\ProgramData\GhostLink\bin\win32"
+    copy /Y "%~dp0bin\win32\*.*" "C:\ProgramData\GhostLink\bin\win32\" >nul 2>&1
+)
 
 echo [*] GhostLink 24/7 Sistem Servisi kaydediliyor (SYSTEM Yetkisi)...
 schtasks /Create /TN GhostLinkService /TR "C:\ProgramData\GhostLink\bin\ghostlink_daemon.exe" /RL HIGHEST /SC ONSTART /RU "SYSTEM" /F
