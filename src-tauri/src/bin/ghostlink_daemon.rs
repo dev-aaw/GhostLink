@@ -166,8 +166,37 @@ async fn main() -> Result<()> {
                     // port. Kill it directly via the lock-free PID handle.
                     let pid = engine_pid_for_signals.load(std::sync::atomic::Ordering::SeqCst);
                     if pid != 0 {
-                        eprintln!("   killing orphaned engine child pid {pid}");
-                        let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+                        // kill(pid, 0) is a pure existence check (sends no
+                        // signal). It narrows the PID-reuse window (the child
+                        // already exited on its own and the OS recycled its PID
+                        // before this fallback ran) down to the gap between
+                        // this check and the SIGKILL below, instead of the
+                        // whole 3s+ timeout that preceded it. Not a complete
+                        // fix — only an OS process handle (pidfd / kqueue
+                        // EVFILT_PROC) closes that gap entirely — but a cheap
+                        // reduction of an already-narrow, theoretical risk, and
+                        // ProcessHandle::spawn/kill (v2.1.26) now clear this
+                        // slot promptly on every normal path, so a genuinely
+                        // stale PID here should be rare.
+                        #[cfg(target_os = "macos")]
+                        {
+                            let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+                            if still_alive {
+                                eprintln!("   killing orphaned engine child pid {pid}");
+                                unsafe {
+                                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                                }
+                            } else {
+                                eprintln!("   engine child pid {pid} already exited; nothing to kill");
+                            }
+                        }
+                        // libc is a macOS-only dependency here; keep the
+                        // subprocess form for a hypothetical non-macOS unix build.
+                        #[cfg(all(unix, not(target_os = "macos")))]
+                        {
+                            eprintln!("   killing orphaned engine child pid {pid}");
+                            let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+                        }
                     }
                 }
             }
