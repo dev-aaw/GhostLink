@@ -50,6 +50,18 @@ impl BinaryManager {
             return false;
         }
 
+        // An interrupted earlier download can leave a zero-byte or partial
+        // `tpws` that exists() reports as present; ensure_binaries() would then
+        // just chmod +x it and start() would spawn a binary that crashes on
+        // launch, with no re-fetch. Treat an implausibly small file as absent.
+        #[cfg(target_os = "macos")]
+        {
+            match fs::metadata(&exe) {
+                Ok(meta) if meta.len() >= 4096 => {}
+                _ => return false,
+            }
+        }
+
         #[cfg(target_os = "windows")]
         {
             let divert_dll = self.bin_dir.join("WinDivert.dll");
@@ -206,8 +218,22 @@ impl BinaryManager {
 
             let name_str = file_name.to_string_lossy();
             if name_str.ends_with("binaries/mac64/tpws") || name_str.ends_with("mac64/tpws") {
-                let mut outfile = File::create(&target_path)?;
-                io::copy(&mut file, &mut outfile)?;
+                // Extract to a sibling temp file, then atomically rename into
+                // place so an interrupted extraction never leaves a
+                // usable-looking but truncated `tpws`.
+                let tmp_path = target_path.with_extension("partial");
+                let mut outfile = File::create(&tmp_path)?;
+                let written = io::copy(&mut file, &mut outfile)?;
+                outfile.sync_all().ok();
+                drop(outfile);
+
+                if written < 4096 {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(anyhow!("Extracted tpws is implausibly small ({} bytes); archive layout may have changed", written));
+                }
+
+                fs::rename(&tmp_path, &target_path)
+                    .with_context(|| format!("Failed to move extracted tpws into place at {:?}", target_path))?;
                 found = true;
                 break;
             }
