@@ -261,41 +261,59 @@ impl UnblockEngine {
             let socks_port = self.config.socks_port;
 
             tokio::spawn(async move {
-            while watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            use std::sync::atomic::Ordering::SeqCst;
+            // Only a *sustained* outage should tear down the user's network
+            // config. A single failed probe is expected under transient load
+            // (tpws saturated at --maxconn, CPU spike, sleep/wake) and must not
+            // orphan tpws while silently flipping the system proxy + DNS off.
+            // 3 strikes * 1.5s ≈ 4.5s of continuous unresponsiveness.
+            const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+            let mut consecutive_failures: u32 = 0;
+
+            while watchdog_flag.load(SeqCst) {
                 tokio::time::sleep(Duration::from_millis(1500)).await;
-                if !watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                if !watchdog_flag.load(SeqCst) {
                     break;
                 }
 
-                {
-                    // Actively probe localhost port with timeout
-                    let check = tokio::time::timeout(
-                        Duration::from_millis(350),
-                        tokio::net::TcpStream::connect(("127.0.0.1", socks_port)),
-                    ).await;
+                // Actively probe localhost port with timeout
+                let check = tokio::time::timeout(
+                    Duration::from_millis(600),
+                    tokio::net::TcpStream::connect(("127.0.0.1", socks_port)),
+                ).await;
+                let port_ok = matches!(check, Ok(Ok(_)));
 
-                    let port_ok = matches!(check, Ok(Ok(_)));
-
-                    if !port_ok {
-                        if watchdog_flag.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                            eprintln!("\n🚨 EMERGENCY WATCHDOG TRIGGERED: GhostLink engine dropped! Restoring system network settings instantly...");
-                            if let Some(service) = SystemProxyManager::detect_primary_macos_service() {
-                                let _ = std::process::Command::new("networksetup")
-                                    .args(["-setsocksfirewallproxystate", &service, "off"])
-                                    .status();
-                                let _ = std::process::Command::new("networksetup")
-                                    .args(["-setdnsservers", &service, "Empty"])
-                                    .status();
-                            }
-                            crate::engine::notifications::notify(
-                                "GhostLink Emergency Recovery",
-                                "GhostLink recovered from an error automatically (network restored)",
-                            );
-                            eprintln!("✨ System network settings restored to normal.\n");
-                            break;
-                        }
+                if port_ok {
+                    if consecutive_failures > 0 {
+                        eprintln!("✅ Watchdog: local proxy port {} responsive again after {} failed check(s).", socks_port, consecutive_failures);
                     }
+                    consecutive_failures = 0;
+                    continue;
                 }
+
+                consecutive_failures += 1;
+                eprintln!("⚠️ Watchdog: local proxy port {} unresponsive ({}/{}).", socks_port, consecutive_failures, MAX_CONSECUTIVE_FAILURES);
+                if consecutive_failures < MAX_CONSECUTIVE_FAILURES {
+                    continue;
+                }
+
+                if watchdog_flag.swap(false, SeqCst) {
+                    eprintln!("\n🚨 EMERGENCY WATCHDOG TRIGGERED: proxy port {} down for {} consecutive checks. Restoring system network settings...", socks_port, MAX_CONSECUTIVE_FAILURES);
+                    if let Some(service) = SystemProxyManager::detect_primary_macos_service() {
+                        let _ = std::process::Command::new("networksetup")
+                            .args(["-setsocksfirewallproxystate", &service, "off"])
+                            .status();
+                        let _ = std::process::Command::new("networksetup")
+                            .args(["-setdnsservers", &service, "Empty"])
+                            .status();
+                    }
+                    crate::engine::notifications::notify(
+                        "GhostLink Emergency Recovery",
+                        "GhostLink recovered from an error automatically (network restored)",
+                    );
+                    eprintln!("✨ System network settings restored to normal.\n");
+                }
+                break;
             }
             });
         }
