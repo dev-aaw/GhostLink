@@ -15,27 +15,48 @@ pub struct Logger {
 
 impl Logger {
     pub fn new(component: &str) -> Self {
-        let base_dir = {
-            #[cfg(target_os = "windows")]
-            {
-                let pdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
-                PathBuf::from(pdata).join("GhostLink").join("logs")
+        // Preferred location first, then a guaranteed user-writable fallback. The
+        // SYSTEM daemon writes to %ProgramData%\GhostLink\logs; the CLI/tray run as
+        // the standard user and, if that directory is locked down to read-only for
+        // Users, transparently fall back to %LOCALAPPDATA% instead of silently
+        // losing all file logging.
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(pdata) = std::env::var("ProgramData") {
+                candidates.push(PathBuf::from(pdata).join("GhostLink").join("logs"));
             }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(home).join(".ghostlink").join("logs")
+            if let Ok(local) = std::env::var("LOCALAPPDATA") {
+                candidates.push(PathBuf::from(local).join("GhostLink").join("logs"));
             }
-        };
+            candidates.push(PathBuf::from(r"C:\ProgramData\GhostLink\logs"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            candidates.push(PathBuf::from(home).join(".ghostlink").join("logs"));
+        }
 
-        let _ = fs::create_dir_all(&base_dir);
-        let log_file_path = base_dir.join(format!("{}.log", component));
-
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file_path)
-            .ok();
+        let (log_file_path, file) = candidates
+            .iter()
+            .find_map(|dir| {
+                let _ = fs::create_dir_all(dir);
+                let path = dir.join(format!("{}.log", component));
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .ok()
+                    .map(|f| (path, Some(f)))
+            })
+            .unwrap_or_else(|| {
+                let fallback = candidates
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(format!("{}.log", component));
+                (fallback, None)
+            });
 
         Self {
             component: component.to_string(),

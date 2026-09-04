@@ -187,14 +187,19 @@ impl ServiceManager {
 
             let daemon_path_str = source_daemon_bin.to_string_lossy();
 
-            // 1. Create elevated task scheduled to run with HIGHEST available privileges on logon
+            // 1. Register the daemon as a boot-time SYSTEM task. ONSTART + /RU SYSTEM
+            //    (session 0, no interactive token) is what makes GhostLink run 24/7
+            //    with zero UAC prompts. ONLOGON without /RU SYSTEM would run as the
+            //    logged-in user and either prompt for elevation or fail to get admin
+            //    on a standard account. This must match ghostlink_admin_setup.bat.
             let status = silent_command("schtasks.exe")
                 .args([
                     "/Create",
                     "/TN", WIN_TASK_NAME,
                     "/TR", &format!("\"{}\"", daemon_path_str),
                     "/RL", "HIGHEST",
-                    "/SC", "ONLOGON",
+                    "/SC", "ONSTART",
+                    "/RU", "SYSTEM",
                     "/F"
                 ])
                 .status()

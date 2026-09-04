@@ -418,17 +418,21 @@ impl StrategyConfigManager {
     pub fn config_paths() -> Vec<std::path::PathBuf> {
         let mut paths = Vec::new();
 
-        // 1. User Home ~/.ghostlink/selected_strategy.txt
+        // 1. User Home ~/.ghostlink/selected_strategy.txt (always user-writable, authoritative)
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| ".".to_string());
         paths.push(std::path::PathBuf::from(home).join(".ghostlink").join("selected_strategy.txt"));
 
-        // 2. Windows shared ProgramData
+        // 2. Windows shared ProgramData. The user-writable `state\` subdir is the write
+        //    target for the tray/CLI; the legacy root path is kept only as a read
+        //    fallback so existing installs still pick up their saved strategy.
         #[cfg(target_os = "windows")]
         {
             let pdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
-            paths.push(std::path::PathBuf::from(pdata).join("GhostLink").join("selected_strategy.txt"));
+            let base = std::path::PathBuf::from(pdata).join("GhostLink");
+            paths.push(base.join("state").join("selected_strategy.txt"));
+            paths.push(base.join("selected_strategy.txt"));
         }
 
         paths

@@ -32,8 +32,14 @@ echo [*] Dizinler hazirlaniyor: C:\ProgramData\GhostLink
 if not exist "C:\ProgramData\GhostLink\bin" mkdir "C:\ProgramData\GhostLink\bin"
 if not exist "C:\ProgramData\GhostLink\lists" mkdir "C:\ProgramData\GhostLink\lists"
 if not exist "C:\ProgramData\GhostLink\logs" mkdir "C:\ProgramData\GhostLink\logs"
+if not exist "C:\ProgramData\GhostLink\state" mkdir "C:\ProgramData\GhostLink\state"
 echo [*] Dizin guvenlik izinleri ayarlaniyor (ACL kilitleme)...
+:: Root: bin + lists are read/execute only for standard users (tamper protection).
 icacls "C:\ProgramData\GhostLink" /inheritance:r /grant:r "SYSTEM":(OI)(CI)F /grant:r "Administrators":(OI)(CI)F /grant:r "Users":(OI)(CI)RX >nul 2>&1
+:: logs + state must be writable by the user-context tray/CLI, otherwise they hit
+:: UnauthorizedAccessException on every strategy switch and lose all file logging.
+icacls "C:\ProgramData\GhostLink\logs" /grant:r "Users":(OI)(CI)M >nul 2>&1
+icacls "C:\ProgramData\GhostLink\state" /grant:r "Users":(OI)(CI)M >nul 2>&1
 
 set "BIN_SRC="
 if exist "%~dp0bin\ghostlink_daemon.exe" (
@@ -78,6 +84,7 @@ ipconfig /flushdns >nul 2>&1
 
 echo [*] Varsayilan strateji [win-general] seciliyor...
 echo win-general> "C:\ProgramData\GhostLink\selected_strategy.txt"
+echo win-general> "C:\ProgramData\GhostLink\state\selected_strategy.txt"
 if not exist "%USERPROFILE%\.ghostlink" mkdir "%USERPROFILE%\.ghostlink"
 echo win-general> "%USERPROFILE%\.ghostlink\selected_strategy.txt"
 
