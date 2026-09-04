@@ -34,4 +34,5 @@ wg*.conf
 privatekey
 publickey
 presharedkey
-GhostLink_v2.0_Windows*
+GhostLink_v*_Windows/
+GhostLink_v*_Windows*.zip

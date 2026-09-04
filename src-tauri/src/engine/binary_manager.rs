@@ -71,6 +71,11 @@ impl BinaryManager {
             #[cfg(unix)]
             self.set_executable_permissions(&self.get_executable_path())?;
 
+            // Portable install: integrity-check the pre-shipped binaries against the
+            // bundled manifest if one is present. Warn-only — a drifted hash must
+            // not brick a working install, but it should be visible in the log.
+            self.verify_shipped_checksums();
+
             return Ok(self.get_executable_path());
         }
 
@@ -100,6 +105,47 @@ impl BinaryManager {
         self.set_executable_permissions(&exe)?;
 
         Ok(exe)
+    }
+
+    /// Verify pre-shipped binaries against `checksums.sha256` in the bin dir, if it
+    /// exists. Lines are `<sha256hex>  <filename>` (sha256sum format). Logs a
+    /// warning on any mismatch or missing file; never fails.
+    fn verify_shipped_checksums(&self) {
+        let manifest = self.bin_dir.join("checksums.sha256");
+        let Ok(text) = fs::read_to_string(&manifest) else {
+            return;
+        };
+
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let (Some(expected), Some(name)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            // `sha256sum` binary mode prefixes the name with '*'.
+            let name = name.trim_start_matches('*');
+            let path = self.bin_dir.join(name);
+            let actual = match fs::read(&path) {
+                Ok(bytes) => {
+                    let mut h = Sha256::new();
+                    h.update(&bytes);
+                    hex::encode(h.finalize())
+                }
+                Err(_) => {
+                    eprintln!("⚠️ [integrity] shipped binary missing: {}", name);
+                    continue;
+                }
+            };
+            if !actual.eq_ignore_ascii_case(expected) {
+                eprintln!(
+                    "⚠️ [integrity] checksum mismatch for {} (expected {}, got {}). Binary may be tampered or out of date.",
+                    name, expected, actual
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
