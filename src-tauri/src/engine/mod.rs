@@ -252,15 +252,15 @@ impl UnblockEngine {
 
         // 3. Start Active Emergency Watchdog.
         //    On Windows the daemon owns health/revival (via check_health + a rolling
-        //    circuit breaker), so this internal loop is macOS-only — spawning it on
-        //    Windows just leaked an idle task that spun until stop().
-        let watchdog_flag = self.watchdog_running.clone();
-        watchdog_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        //    circuit breaker), so this internal loop — and the watchdog_running flag
+        //    that drives it — are macOS-only. On Windows there is no loop to arm.
         #[cfg(target_os = "macos")]
-        let socks_port = self.config.socks_port;
+        {
+            let watchdog_flag = self.watchdog_running.clone();
+            watchdog_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            let socks_port = self.config.socks_port;
 
-        #[cfg(target_os = "macos")]
-        tokio::spawn(async move {
+            tokio::spawn(async move {
             while watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(1500)).await;
                 if !watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
@@ -297,7 +297,8 @@ impl UnblockEngine {
                     }
                 }
             }
-        });
+            });
+        }
 
         Ok(())
     }
@@ -432,9 +433,13 @@ impl UnblockEngine {
             sleep(Duration::from_millis(300)).await;
         }
 
-        // Pause watchdog during auto-tune to prevent false restarts while we kill/spawn winws per strategy
-        let was_watchdog_active = self.watchdog_running.load(std::sync::atomic::Ordering::SeqCst);
-        if was_watchdog_active {
+        // Pause the macOS emergency watchdog during auto-tune so its port probe
+        // doesn't fire a false recovery while we kill/spawn winws per strategy.
+        // (On Windows there is no such loop — the daemon circuit breaker already
+        // stands down while auto_tune holds the state lock — so there is nothing
+        // to pause and no reason to dead-wait.)
+        #[cfg(target_os = "macos")]
+        if self.watchdog_running.load(std::sync::atomic::Ordering::SeqCst) {
             self.watchdog_running.store(false, std::sync::atomic::Ordering::SeqCst);
             // Give the watchdog loop time to notice the flag and exit
             sleep(Duration::from_millis(200)).await;
