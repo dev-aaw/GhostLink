@@ -299,7 +299,9 @@ impl UnblockEngine {
 
                 if watchdog_flag.swap(false, SeqCst) {
                     eprintln!("\n🚨 EMERGENCY WATCHDOG TRIGGERED: proxy port {} down for {} consecutive checks. Restoring system network settings...", socks_port, MAX_CONSECUTIVE_FAILURES);
-                    if let Some(service) = SystemProxyManager::detect_primary_macos_service() {
+                    let target = crate::engine::system_proxy::recorded_active_service()
+                        .or_else(SystemProxyManager::detect_primary_macos_service);
+                    if let Some(service) = target {
                         let _ = std::process::Command::new("networksetup")
                             .args(["-setsocksfirewallproxystate", &service, "off"])
                             .status();
@@ -307,6 +309,7 @@ impl UnblockEngine {
                             .args(["-setdnsservers", &service, "Empty"])
                             .status();
                     }
+                    crate::engine::system_proxy::clear_recorded_service();
                     crate::engine::notifications::notify(
                         "GhostLink Emergency Recovery",
                         "GhostLink recovered from an error automatically (network restored)",

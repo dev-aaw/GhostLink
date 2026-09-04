@@ -5,6 +5,42 @@ use anyhow::Context;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
+/// Records the exact `networksetup` service name the SOCKS proxy was last
+/// enabled on. The primary network service can change while GhostLink runs
+/// (Wi-Fi <-> Ethernet), and the teardown may run from a *different* process
+/// (`ghostlink_cli stop`, the watchdog). Re-detecting the primary service at
+/// disable time then turns the proxy off on the wrong service and silently
+/// leaves it enabled on the original one — no internet, no error.
+#[cfg(target_os = "macos")]
+fn recorded_service_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".ghostlink").join("active_service"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn record_active_service(service: &str) {
+    if let Some(path) = recorded_service_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, service.as_bytes());
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn recorded_active_service() -> Option<String> {
+    let raw = std::fs::read_to_string(recorded_service_path()?).ok()?;
+    let name = raw.trim();
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+#[cfg(target_os = "macos")]
+pub fn clear_recorded_service() {
+    if let Some(path) = recorded_service_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 pub struct SystemProxyManager {
     #[allow(dead_code)]
     active_service: Option<String>,
@@ -135,6 +171,10 @@ impl SystemProxyManager {
                 .args(["-setdnsservers", service, "1.1.1.1", "1.0.0.1", "8.8.8.8"])
                 .status();
 
+            // Pin the exact service so teardown targets it even if the primary
+            // network service changes or a different process performs the stop.
+            record_active_service(service);
+            self.active_service = Some(service.to_string());
             self.proxy_is_active = true;
         }
         Ok(())
@@ -144,8 +184,13 @@ impl SystemProxyManager {
     pub fn disable_macos_proxy(&mut self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            let detected = self.active_service.clone().or_else(Self::detect_primary_macos_service);
-            if let Some(ref service) = detected {
+            // Prefer the service the proxy was actually enabled on (recorded to
+            // disk), then this instance's memory, then a fresh detection.
+            let target = recorded_active_service()
+                .or_else(|| self.active_service.clone())
+                .or_else(Self::detect_primary_macos_service);
+
+            if let Some(ref service) = target {
                 println!("🌐 Disabling macOS SOCKS proxy and restoring network settings on [{}]...", service);
 
                 let _ = Command::new("networksetup")
@@ -157,6 +202,8 @@ impl SystemProxyManager {
                     .status();
             }
 
+            clear_recorded_service();
+            self.active_service = None;
             self.proxy_is_active = false;
         }
         Ok(())
