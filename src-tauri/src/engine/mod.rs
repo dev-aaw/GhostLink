@@ -158,6 +158,11 @@ impl UnblockEngine {
 
     /// Starts the engine with a specific strategy.
     pub async fn start(&mut self, strategy: &Strategy) -> Result<()> {
+        // An explicit start is the user's (or watchdog's) retry: leave any Faulted
+        // state so a WinDivert driver that has since recovered isn't locked out
+        // until the daemon process restarts.
+        self.clear_faulted();
+
         // stop() below tears down the WinDivert driver as part of shutdown; track
         // whether it ran so the Windows pre-flight doesn't repeat that teardown.
         let stopped_first = self.is_running() || self.active_process.is_some();
@@ -351,8 +356,9 @@ impl UnblockEngine {
         self.state = EngineState::Faulted(reason);
     }
 
-    /// Clear a Faulted state back to Stopped (e.g. after the user reboots and the
-    /// daemon restarts, or an explicit manual reset).
+    /// Clear a Faulted state back to Stopped. Called at the top of `start()` so an
+    /// explicit start/SetStrategy retry can recover once WinDivert is healthy again,
+    /// without waiting for a daemon restart.
     pub fn clear_faulted(&mut self) {
         if matches!(self.state, EngineState::Faulted(_)) {
             self.state = EngineState::Stopped;
