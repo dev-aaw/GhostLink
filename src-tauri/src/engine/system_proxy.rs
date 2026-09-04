@@ -536,12 +536,18 @@ fn adapters_via_iphelper() -> Vec<String> {
 
     let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
     let mut size: u32 = 16 * 1024;
-    let mut buf: Vec<u8> = Vec::new();
+    // GetAdaptersAddresses writes IP_ADAPTER_ADDRESSES_LH structs (64-bit fields and
+    // pointers) into this buffer, and MS docs require it to be pointer-aligned. A
+    // `Vec<u8>` is only 1-byte aligned, so back the buffer with `u64` — that gives a
+    // guaranteed 8-byte alignment, enough for every field in the struct chain.
+    let mut buf: Vec<u64> = Vec::new();
+    let u64s_for = |bytes: u32| ((bytes as usize) + 7) / 8;
     let mut adapters: Vec<String> = Vec::new();
 
     unsafe {
         for _ in 0..4 {
-            buf.resize(size as usize, 0);
+            buf.clear();
+            buf.resize(u64s_for(size), 0);
             let ret = GetAdaptersAddresses(
                 AF_UNSPEC,
                 flags,
