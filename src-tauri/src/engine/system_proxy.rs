@@ -27,62 +27,85 @@ const ACTIVE_SERVICE_FILE: &str = "/Library/Application Support/GhostLink/active
 /// Security: `/Library/Application Support` is `root:admin`, group-writable, so
 /// any local user in the admin group (the common case for a Mac's primary
 /// account) can delete the `GhostLink` subdir `service install` created and
-/// replace it with a symlink to an arbitrary directory. Without the checks
+/// replace it with a symlink to an arbitrary directory. Without the defense
 /// below, the root daemon would `create_dir_all()` straight through that
 /// symlink and write `active_service` wherever the attacker pointed — a local
-/// root file-write primitive. Same defense pattern as `ipc.rs`'s
-/// `is_trusted_socket()` and `process.rs`'s log-file open: verify with
-/// `symlink_metadata` (never follows the final component) before touching
-/// anything, and close the remaining TOCTOU on the leaf file with `O_NOFOLLOW`
-/// at open time.
+/// root file-write primitive.
+///
+/// A path-based check-then-act (`symlink_metadata`, then act on the same path
+/// again) still leaves a TOCTOU window: an attacker can swap the parent
+/// directory for a symlink *between* the check and the later open, and
+/// `O_NOFOLLOW` on the leaf file alone only protects the final path component
+/// — it does not stop the OS from walking through a symlinked *intermediate*
+/// directory to get there. Closing that requires a directory-fd (`openat`)
+/// approach: open the parent directory itself with `O_NOFOLLOW` (refusing to
+/// follow it if it's a symlink) and keep that as a file descriptor, then open
+/// the leaf *relative to that fd* rather than by path. Once the directory fd is
+/// obtained it refers to that specific directory instance — deleting or
+/// resymlinking the path afterward cannot redirect writes made through the fd.
 #[cfg(target_os = "macos")]
 pub fn record_active_service(service: &str) {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::io::{AsRawFd, FromRawFd};
 
     let path = std::path::Path::new(ACTIVE_SERVICE_FILE);
-    let parent = match path.parent() {
-        Some(p) => p,
-        None => return,
+    let (parent, file_name) = match (path.parent(), path.file_name()) {
+        (Some(p), Some(f)) => (p, f),
+        _ => return,
     };
 
-    let parent_is_plain_dir = |p: &std::path::Path| {
-        matches!(std::fs::symlink_metadata(p), Ok(meta) if meta.file_type().is_dir() && !meta.file_type().is_symlink())
-    };
+    // Best-effort creation on first run (root, before `service install` has
+    // ever run); a harmless no-op failure otherwise (non-root, or the
+    // directory already exists). This is still a plain path-based create and
+    // is NOT the security boundary — the O_NOFOLLOW open right below is.
+    let _ = std::fs::create_dir_all(parent);
 
-    if !parent_is_plain_dir(parent) {
-        // Parent missing entirely (first run before `service install`) is fine
-        // to create; anything else that already exists there and isn't a plain
-        // directory (in particular, a symlink) is refused outright.
-        if std::fs::symlink_metadata(parent).is_ok() {
-            eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: parent is not a plain directory");
-            return;
-        }
-        if std::fs::create_dir_all(parent).is_err() || !parent_is_plain_dir(parent) {
-            eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: could not create a plain parent directory");
-            return;
-        }
-    }
-
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: target is a symlink");
-            return;
-        }
-    }
-
-    // O_NOFOLLOW closes the window between the check above and this open: if a
-    // symlink appears at `path` in between, the open fails (ELOOP) instead of
-    // writing through it.
-    match std::fs::OpenOptions::new().write(true).create(true).truncate(true).custom_flags(libc::O_NOFOLLOW).open(path) {
-        Ok(mut f) => {
-            use std::io::Write;
-            if f.write_all(service.as_bytes()).is_ok() {
-                let _ = f.set_permissions(std::fs::Permissions::from_mode(0o644));
-            }
-        }
+    let dir = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(parent)
+    {
+        Ok(d) => d,
         Err(e) => {
-            eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: {e}");
+            eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: could not open parent directory safely ({e})");
+            return;
         }
+    };
+
+    let file_name_c = match CString::new(file_name.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // SAFETY: `dir` is a valid, open directory fd for the lifetime of this
+    // call (held in `dir`, closed when it drops after we're done with `fd`).
+    // `file_name_c` is a valid NUL-terminated C string for the duration of the
+    // call. openat() resolves `file_name_c` relative to `dir`'s specific
+    // directory instance, not the current path lookup of ACTIVE_SERVICE_FILE's
+    // parent, and O_NOFOLLOW refuses to follow a symlink at that leaf. The
+    // `mode` vararg is only consulted by the OS because O_CREAT is set.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            file_name_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW,
+            0o644 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: {err}");
+        return;
+    }
+
+    // SAFETY: `fd` was just returned by a successful openat() above and is not
+    // owned/closed anywhere else; File takes ownership and closes it on drop.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    if file.write_all(service.as_bytes()).is_ok() {
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o644));
     }
 }
 
