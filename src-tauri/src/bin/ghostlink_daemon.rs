@@ -58,6 +58,11 @@ async fn main() -> Result<()> {
         start_time: Instant::now(),
     }));
 
+    // Grab the engine-child PID handle now, while the lock is uncontended, so the
+    // shutdown-timeout path can kill an orphaned tpws without the state lock.
+    #[cfg(unix)]
+    let engine_pid = { state.lock().await.engine.engine_pid_handle() };
+
     // A fresh daemon owns no engine, so any SOCKS proxy still pointing at our
     // loopback port is stale — left by a previous daemon that was SIGKILLed
     // (e.g. launchd's shutdown timeout during a long AutoTune) before it could
@@ -127,6 +132,7 @@ async fn main() -> Result<()> {
 
         let state_for_signals = Arc::clone(&state);
         let socket_for_signals = actual_socket_path.clone();
+        let engine_pid_for_signals = engine_pid.clone();
 
         tokio::spawn(async move {
             tokio::select! {
@@ -147,9 +153,17 @@ async fn main() -> Result<()> {
                     let _ = st.engine.stop().await;
                 }
                 Err(_) => {
-                    eprintln!("⚠️ State lock busy during shutdown — best-effort network restore without it.");
+                    eprintln!("⚠️ State lock busy during shutdown — best-effort restore without it.");
                     #[cfg(target_os = "macos")]
                     best_effort_proxy_off();
+                    // engine.stop() never ran, so the engine child (tpws/winws)
+                    // would be reparented to launchd still holding the SOCKS
+                    // port. Kill it directly via the lock-free PID handle.
+                    let pid = engine_pid_for_signals.load(std::sync::atomic::Ordering::SeqCst);
+                    if pid != 0 {
+                        eprintln!("   killing orphaned engine child pid {pid}");
+                        let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+                    }
                 }
             }
             if socket_for_signals.exists() {

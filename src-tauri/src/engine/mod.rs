@@ -14,7 +14,7 @@ pub mod wireguard;
 pub mod service;
 
 use anyhow::{anyhow, Result};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -91,6 +91,10 @@ pub struct UnblockEngine {
     probe_runner: ProbeRunner,
     active_process: Option<ProcessHandle>,
     watchdog_running: Arc<AtomicBool>,
+    /// PID of the live engine child (tpws / winws), or 0. Kept outside the
+    /// daemon's state Mutex so a shutdown path that cannot acquire the lock can
+    /// still kill the child instead of orphaning it on the SOCKS port.
+    active_engine_pid: Arc<AtomicU32>,
 }
 
 impl UnblockEngine {
@@ -113,7 +117,14 @@ impl UnblockEngine {
             probe_runner,
             active_process: None,
             watchdog_running: Arc::new(AtomicBool::new(false)),
+            active_engine_pid: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// A handle to the live engine child's PID (0 = none), readable without the
+    /// daemon state lock. Used by the daemon's shutdown-timeout path.
+    pub fn engine_pid_handle(&self) -> Arc<AtomicU32> {
+        self.active_engine_pid.clone()
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -193,6 +204,7 @@ impl UnblockEngine {
 
         println!("🚀 Launching engine with strategy: [{}]", strategy.name);
         let proc = ProcessHandle::spawn(&exe_path, &strategy.args)?;
+        self.active_engine_pid.store(proc.id(), std::sync::atomic::Ordering::SeqCst);
         self.active_process = Some(proc);
 
         // Give the process a brief moment to initialize its socket/driver
@@ -327,6 +339,7 @@ impl UnblockEngine {
     /// Stops the running engine and restores system settings.
     pub async fn stop(&mut self) -> Result<()> {
         self.watchdog_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.active_engine_pid.store(0, std::sync::atomic::Ordering::SeqCst);
 
         let active_pid = if let Some(mut proc) = self.active_process.take() {
             let pid = proc.id();
@@ -371,6 +384,7 @@ impl UnblockEngine {
     pub async fn mark_faulted(&mut self, reason: impl Into<String>) {
         let reason = reason.into();
         self.watchdog_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.active_engine_pid.store(0, std::sync::atomic::Ordering::SeqCst);
         if let Some(mut proc) = self.active_process.take() {
             let _ = proc.kill();
         }
