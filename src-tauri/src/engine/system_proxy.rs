@@ -116,9 +116,51 @@ pub fn recorded_active_service() -> Option<String> {
     if name.is_empty() { None } else { Some(name.to_string()) }
 }
 
+/// Same dirfd defense as `record_active_service()`: `unlink()` never follows a
+/// symlink at the final path component, but a plain `std::fs::remove_file`
+/// still walks through a symlinked *parent* directory to get there — if an
+/// admin-group attacker has swapped `GhostLink` for a symlink, that would
+/// unlink a file literally named "active_service" inside whatever directory
+/// the attacker chose (they cannot pick the filename, only the directory, so
+/// this is narrower than the write primitive `record_active_service()`
+/// guards against, but the same class of bug). Opening the parent with
+/// `O_NOFOLLOW | O_DIRECTORY` and deleting via `unlinkat` relative to that fd
+/// closes it the same way.
 #[cfg(target_os = "macos")]
 pub fn clear_recorded_service() {
-    let _ = std::fs::remove_file(ACTIVE_SERVICE_FILE);
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let path = std::path::Path::new(ACTIVE_SERVICE_FILE);
+    let (parent, file_name) = match (path.parent(), path.file_name()) {
+        (Some(p), Some(f)) => (p, f),
+        _ => return,
+    };
+
+    let dir = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(parent)
+    {
+        Ok(d) => d,
+        Err(_) => return, // parent missing or not a plain directory: nothing to clear
+    };
+
+    let file_name_c = match CString::new(file_name.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // SAFETY: `dir` is a valid open directory fd for the duration of this
+    // call; `file_name_c` is a valid NUL-terminated string. unlinkat() removes
+    // the entry relative to `dir`'s specific directory instance, not a fresh
+    // path lookup, and (like plain unlink) never follows a symlink at the
+    // leaf itself.
+    unsafe {
+        libc::unlinkat(dir.as_raw_fd(), file_name_c.as_ptr(), 0);
+    }
 }
 
 pub struct SystemProxyManager {

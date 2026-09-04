@@ -174,10 +174,17 @@ async fn main() -> Result<()> {
                     // child (IpcRequest::TestStrategy does not stop() the real
                     // engine first) would orphan the same way, in its own slot.
                     // Both are independent and both may be non-zero at once.
-                    let pid_a = engine_pid_for_signals.load(std::sync::atomic::Ordering::SeqCst);
-                    let pid_b = benchmark_pid_for_signals.load(std::sync::atomic::Ordering::SeqCst);
-                    kill_orphan_if_alive(pid_a, "engine");
-                    kill_orphan_if_alive(pid_b, "benchmark");
+                    // kill_orphan_if_alive is #[cfg(target_os = "macos")] (libc
+                    // is a macOS-only dependency); gate these call sites the
+                    // same way rather than relying on the enclosing #[cfg(unix)]
+                    // block, to keep the cfgs honest with each other.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let pid_a = engine_pid_for_signals.load(std::sync::atomic::Ordering::SeqCst);
+                        let pid_b = benchmark_pid_for_signals.load(std::sync::atomic::Ordering::SeqCst);
+                        kill_orphan_if_alive(pid_a, "engine");
+                        kill_orphan_if_alive(pid_b, "benchmark");
+                    }
                 }
             }
             if socket_for_signals.exists() {
