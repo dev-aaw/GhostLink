@@ -274,23 +274,26 @@ impl UnblockEngine {
 
             tokio::spawn(async move {
             use std::sync::atomic::Ordering::SeqCst;
-            // Only a *sustained* outage should tear down the user's network
-            // config. A single failed probe is expected under transient load
-            // (tpws saturated at --maxconn, CPU spike, sleep/wake) and must not
-            // orphan tpws while silently flipping the system proxy + DNS off.
-            // 3 strikes * 1.5s ≈ 4.5s of continuous unresponsiveness.
-            const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+            // Debounce just enough to swallow a *single* spurious probe miss
+            // (tpws momentarily at --maxconn, a scheduler stall, a sleep/wake
+            // blip) without letting a genuine crash black-hole traffic for long.
+            // 2 is the minimum count that still debounces (one miss alone can't
+            // trigger); more only adds recovery latency for a real crash. At a
+            // 800ms interval + 400ms probe timeout, teardown fires ~1.6-2.4s
+            // after the listener actually dies — close to the pre-hardening
+            // single-probe latency, but immune to a lone transient failure.
+            const MAX_CONSECUTIVE_FAILURES: u32 = 2;
             let mut consecutive_failures: u32 = 0;
 
             while watchdog_flag.load(SeqCst) {
-                tokio::time::sleep(Duration::from_millis(1500)).await;
+                tokio::time::sleep(Duration::from_millis(800)).await;
                 if !watchdog_flag.load(SeqCst) {
                     break;
                 }
 
                 // Actively probe localhost port with timeout
                 let check = tokio::time::timeout(
-                    Duration::from_millis(600),
+                    Duration::from_millis(400),
                     tokio::net::TcpStream::connect(("127.0.0.1", socks_port)),
                 ).await;
                 let port_ok = matches!(check, Ok(Ok(_)));
