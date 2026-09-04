@@ -1,6 +1,6 @@
 [package]
 name = "ghostlink"
-version = "2.1.20"
+version = "2.1.21"
 edition = "2021"
 description = "GhostLink - High-performance DPI bypass & censorship resilience engine for macOS & Windows"
 authors = ["GhostLink Team"]

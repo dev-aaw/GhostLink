@@ -63,15 +63,6 @@ async fn main() -> Result<()> {
     #[cfg(unix)]
     let engine_pid = { state.lock().await.engine.engine_pid_handle() };
 
-    // A fresh daemon owns no engine, so any SOCKS proxy still pointing at our
-    // loopback port is stale — left by a previous daemon that was SIGKILLed
-    // (e.g. launchd's shutdown timeout during a long AutoTune) before it could
-    // restore the network. launchd's KeepAlive would otherwise leave the user
-    // stuck: GUI says "stopped" while traffic dead-ends at an orphan tpws.
-    // Reconcile only when the proxy is provably ours (loopback + our port).
-    #[cfg(target_os = "macos")]
-    reconcile_stale_proxy(socks_port);
-
     #[cfg(unix)]
     {
         // 1. Determine socket path and prepare directory
@@ -125,6 +116,20 @@ async fn main() -> Result<()> {
         }
 
         println!("📡 Listening on IPC socket: {:?} (permissions: 0600, owner UID: {})", actual_socket_path, console_uid);
+
+        // A fresh daemon owns no engine, so any SOCKS proxy still pointing at our
+        // loopback port is stale — left by a previous daemon that was SIGKILLed
+        // (launchd's shutdown timeout during a long AutoTune) before it could
+        // restore the network. launchd's KeepAlive would otherwise leave the
+        // user stuck: GUI says "stopped" while traffic dead-ends at an orphan
+        // tpws. Reconcile only when the proxy is provably ours (loopback + our
+        // port). Run it AFTER bind and on the blocking pool: it forks several
+        // `route`/`networksetup` subprocesses (~1-2s) and must not stall the
+        // async executor or delay the listener coming up.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = tokio::task::spawn_blocking(move || reconcile_stale_proxy(socks_port)).await;
+        }
 
         // 4. Setup signal listeners for graceful shutdown
         let mut sigterm = signal(SignalKind::terminate())?;
