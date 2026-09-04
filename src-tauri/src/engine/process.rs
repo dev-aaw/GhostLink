@@ -129,6 +129,17 @@ impl ProcessHandle {
             true // File doesn't exist yet, safe to create
         };
 
+        // Cap the raw engine log so a chatty tpws cannot fill the disk over many
+        // restarts (logging.rs rotates ~/.ghostlink/logs/*, not this pipe file).
+        #[cfg(not(target_os = "windows"))]
+        if can_open {
+            if let Ok(meta) = std::fs::metadata(&log_path) {
+                if meta.len() > 8 * 1024 * 1024 {
+                    let _ = std::fs::write(&log_path, b"");
+                }
+            }
+        }
+
         if can_open {
             if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
                 if let Ok(file_err) = file.try_clone() {

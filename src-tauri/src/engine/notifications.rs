@@ -16,18 +16,23 @@ pub fn notify(title: &str, message: &str) {
             safe_message, safe_title
         );
 
-        // Pipe script via stdin rather than -e to avoid shell argument parsing issues
-        if let Ok(mut child) = silent_command("osascript")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            if let Some(ref mut stdin) = child.stdin {
-                let _ = stdin.write_all(script.as_bytes());
+        // Run osascript on a detached thread: notify() is called from the menu
+        // bar's AppKit main thread, where blocking ~100-300ms on the helper
+        // stutters the UI. The thread still reaps the child so no zombie leaks.
+        std::thread::spawn(move || {
+            // Pipe script via stdin rather than -e to avoid shell argument parsing issues
+            if let Ok(mut child) = silent_command("osascript")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(script.as_bytes());
+                }
+                let _ = child.wait();
             }
-            let _ = child.wait();
-        }
+        });
     }
 
     #[cfg(target_os = "windows")]
