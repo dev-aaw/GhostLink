@@ -132,20 +132,55 @@ impl ServiceManager {
             run_cmd("chmod", &["755", SERVICE_DAEMON_BIN])
                 .context("Failed to set binary permissions")?;
 
-            // 4. Generate and write plist
+            // 4. Generate, stage, then privileged-install the plist.
+            //
+            // Security: stage in the user-owned ~/.ghostlink directory, NOT
+            // world-writable /tmp. Staging in /tmp lets a local user swap the
+            // path for a symlink between our write and the privileged `cp`,
+            // making root install an attacker-controlled LaunchDaemon plist
+            // (persisted code execution as root). ~/.ghostlink is not writable
+            // by other non-root users, closing that window.
             let dest_bin = Path::new(SERVICE_DAEMON_BIN);
             let plist_content = Self::generate_plist_content(dest_bin);
-            let tmp_plist = "/tmp/com.ghostlink.helper.plist";
-            std::fs::write(tmp_plist, plist_content)?;
 
-            run_cmd("cp", &["-f", tmp_plist, PLIST_PATH])
+            let stage_dir = {
+                let home = std::env::var("HOME")
+                    .map_err(|_| anyhow!("HOME is not set; cannot stage the LaunchDaemon plist safely"))?;
+                let d = Path::new(&home).join(".ghostlink");
+                std::fs::create_dir_all(&d).context("Failed to create ~/.ghostlink staging directory")?;
+                d
+            };
+            let staged_plist = stage_dir.join("com.ghostlink.helper.plist");
+
+            // Never write through a pre-existing symlink at the staging path.
+            if let Ok(meta) = std::fs::symlink_metadata(&staged_plist) {
+                if meta.file_type().is_symlink() {
+                    return Err(anyhow!("Refusing to stage plist: {:?} is a symlink", staged_plist));
+                }
+                let _ = std::fs::remove_file(&staged_plist);
+            }
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&staged_plist)
+                    .with_context(|| format!("Failed to create staging plist {:?}", staged_plist))?;
+                f.write_all(plist_content.as_bytes())
+                    .context("Failed to write staging plist contents")?;
+            }
+
+            let staged_str = staged_plist.to_string_lossy().to_string();
+            run_cmd("cp", &["-f", &staged_str, PLIST_PATH])
                 .context("Failed to write LaunchDaemon plist")?;
             run_cmd("chown", &["root:wheel", PLIST_PATH])
                 .context("Failed to set plist ownership")?;
             run_cmd("chmod", &["644", PLIST_PATH])
                 .context("Failed to set plist permissions")?;
 
-            let _ = std::fs::remove_file(tmp_plist);
+            let _ = std::fs::remove_file(&staged_plist);
 
             // 5. Unload previous instance if loaded
             if is_root {
