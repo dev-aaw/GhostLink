@@ -436,6 +436,20 @@ impl StrategyConfigManager {
     pub fn config_paths() -> Vec<std::path::PathBuf> {
         let mut paths = Vec::new();
 
+        // 0. Root daemon (launchd gives it no HOME, so the HOME-derived path
+        //    below is relative and silently never round-trips): the same
+        //    fixed system path EngineConfig::default(), ProcessHandle's
+        //    engine.log, and Logger now use. Tried first so save/load actually
+        //    persist the selected/auto-tuned strategy across daemon restarts
+        //    instead of silently forgetting it every time.
+        #[cfg(target_os = "macos")]
+        {
+            let is_root = unsafe { libc::geteuid() == 0 };
+            if is_root {
+                paths.push(std::path::PathBuf::from("/Library/Application Support/GhostLink/data/selected_strategy.txt"));
+            }
+        }
+
         // 1. User Home ~/.ghostlink/selected_strategy.txt (always user-writable, authoritative)
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))

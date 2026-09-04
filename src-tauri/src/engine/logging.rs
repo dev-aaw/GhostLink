@@ -33,6 +33,23 @@ impl Logger {
         }
         #[cfg(not(target_os = "windows"))]
         {
+            // The root daemon runs under launchd, which gives it no HOME, so
+            // the HOME-derived candidate below resolves to a relative path and
+            // silently fails to open — the daemon's own log_msg()/GetRecentLogs
+            // then write/return nothing for the one process (the production
+            // installed daemon) where diagnosing a real issue matters most.
+            // Give root the same fixed system path EngineConfig::default() and
+            // ProcessHandle::spawn's engine.log now use, tried first; the
+            // HOME-derived path stays as a fallback candidate (harmless to
+            // attempt, matches the existing preferred-then-fallback pattern
+            // used for Windows above).
+            #[cfg(target_os = "macos")]
+            {
+                let is_root = unsafe { libc::geteuid() == 0 };
+                if is_root {
+                    candidates.push(PathBuf::from("/Library/Application Support/GhostLink/data/logs"));
+                }
+            }
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             candidates.push(PathBuf::from(home).join(".ghostlink").join("logs"));
         }

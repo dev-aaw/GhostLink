@@ -121,8 +121,28 @@ impl ProcessHandle {
             }
             #[cfg(not(target_os = "windows"))]
             {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                let dir = std::path::PathBuf::from(home).join(".ghostlink");
+                // The root daemon runs under launchd, which gives it no HOME:
+                // the old unwrap_or_else(|_| ".") fallback resolved to a
+                // RELATIVE path under whatever the daemon's cwd happened to
+                // be, so the engine.log open below silently failed and every
+                // tpws spawned by the real installed daemon lost its
+                // stdout/stderr with no error surfaced anywhere (the same root
+                // cause as EngineConfig::default()'s base_dir, fixed in
+                // v2.1.34 for bin/lists/payloads — this is the log-file
+                // sibling of that bug). Root gets the same fixed system path
+                // EngineConfig::default() now uses as its base_dir, so
+                // engine.log sits right next to bin/ and lists/.
+                #[cfg(target_os = "macos")]
+                let is_root = unsafe { libc::geteuid() == 0 };
+                #[cfg(not(target_os = "macos"))]
+                let is_root = false;
+
+                let dir = if is_root {
+                    std::path::PathBuf::from("/Library/Application Support/GhostLink/data")
+                } else {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    std::path::PathBuf::from(home).join(".ghostlink")
+                };
                 let _ = std::fs::create_dir_all(&dir);
                 dir.join("engine.log")
             }
