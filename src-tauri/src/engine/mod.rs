@@ -62,6 +62,25 @@ fn read_engine_log_tail(lines: usize) -> String {
     tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
 }
 
+/// Single canonical WinDivert teardown for a stop/start transition: force any
+/// stray `winws.exe` to exit, then stop+delete every WinDivert service variant
+/// and wait (bounded) for the kernel driver to actually unload. Returns `false`
+/// if the driver is still wedged after `timeout` (caller should refuse to spawn
+/// a fresh `winws` and surface "a reboot is required").
+///
+/// `teardown_windivert` blocks (child processes + sleeps, up to several seconds),
+/// so it runs on a blocking thread and is awaited — never inline on a tokio
+/// worker while the daemon state lock is held.
+#[cfg(target_os = "windows")]
+async fn reset_windivert_driver(timeout: Duration) -> bool {
+    tokio::task::spawn_blocking(move || {
+        process::kill_stray_winws();
+        process::teardown_windivert(timeout)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 pub struct UnblockEngine {
     config: EngineConfig,
     state: EngineState,
@@ -139,7 +158,10 @@ impl UnblockEngine {
 
     /// Starts the engine with a specific strategy.
     pub async fn start(&mut self, strategy: &Strategy) -> Result<()> {
-        if self.is_running() {
+        // stop() below tears down the WinDivert driver as part of shutdown; track
+        // whether it ran so the Windows pre-flight doesn't repeat that teardown.
+        let stopped_first = self.is_running() || self.active_process.is_some();
+        if stopped_first {
             self.stop().await?;
         }
 
@@ -148,6 +170,20 @@ impl UnblockEngine {
         let exe_path = self.binary_mgr.get_executable_path();
         if !exe_path.exists() {
             return Err(anyhow!("Binary executable not found: {:?}", exe_path));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Canonical pre-flight for the start transition: no stray winws holding
+            // the WinDivert handle, and the driver from a prior crash fully
+            // unloaded, before we spawn a fresh instance. Skip when stop() above
+            // already unloaded it and nothing re-registered it since.
+            let needs_teardown = !stopped_first || process::windivert_is_resident();
+            if needs_teardown && !reset_windivert_driver(Duration::from_secs(6)).await {
+                return Err(anyhow!(
+                    "WinDivert kernel driver is wedged and will not unload; refusing to spawn winws. A reboot is required."
+                ));
+            }
         }
 
         println!("🚀 Launching engine with strategy: [{}]", strategy.name);
@@ -289,6 +325,13 @@ impl UnblockEngine {
                     .args(["/F", "/IM", "winws.exe"])
                     .status();
             }
+
+            // winws is dead but its WinDivert driver stays resident; unload it
+            // here (once, off-thread) so the next start is clean. This is the
+            // single teardown point for the stop transition.
+            if active_pid.is_some() {
+                let _ = reset_windivert_driver(Duration::from_secs(5)).await;
+            }
         }
 
         self.state = EngineState::Stopped;
@@ -322,6 +365,19 @@ impl UnblockEngine {
         self.prepare().await?;
 
         let exe_path = self.binary_mgr.get_executable_path();
+
+        #[cfg(target_os = "windows")]
+        {
+            // One teardown per benchmark spawn (was previously done three times per
+            // strategy: here in auto_tune, again inside ProcessHandle::spawn, and a
+            // third time on kill()/Drop).
+            if !reset_windivert_driver(Duration::from_secs(6)).await {
+                return Err(anyhow!(
+                    "WinDivert kernel driver is wedged and will not unload; a reboot is required."
+                ));
+            }
+        }
+
         let mut proc = ProcessHandle::spawn(&exe_path, &strategy.args)?;
         sleep(Duration::from_millis(700)).await;
 
@@ -386,20 +442,8 @@ impl UnblockEngine {
         for (idx, strat) in strategies.iter().enumerate() {
             progress_cb(idx + 1, total, strat, None);
 
-            // Between benchmark spawns, make sure the previous winws is gone and the
-            // WinDivert driver has fully unloaded before the next one grabs the handle.
-            #[cfg(target_os = "windows")]
-            {
-                if crate::engine::process::windivert_is_resident() {
-                    let cleared = crate::engine::process::teardown_windivert(std::time::Duration::from_secs(6));
-                    if !cleared {
-                        println!("⛔ [AutoTune] WinDivert driver wedged; aborting benchmark early. A reboot is required.");
-                        break;
-                    }
-                }
-                sleep(Duration::from_millis(400)).await;
-            }
-
+            // test_strategy() runs the single per-spawn WinDivert teardown itself
+            // (once), so there is nothing to clean up here between iterations.
             match self.test_strategy(strat).await {
                 Ok(summary) => {
                     progress_cb(idx + 1, total, strat, Some(&summary));
@@ -414,8 +458,15 @@ impl UnblockEngine {
                         }
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     progress_cb(idx + 1, total, strat, None);
+                    // A wedged WinDivert driver won't clear for the next strategy
+                    // either — stop the sweep instead of failing every remaining one.
+                    let msg = e.to_string();
+                    if msg.contains("wedged") || msg.contains("reboot") {
+                        println!("⛔ [AutoTune] WinDivert driver wedged; aborting benchmark early. A reboot is required.");
+                        break;
+                    }
                 }
             }
         }

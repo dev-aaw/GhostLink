@@ -152,16 +152,11 @@ impl ProcessHandle {
             const CREATE_NO_WINDOW: u32 = 0x08000000;
             cmd.creation_flags(CREATE_NO_WINDOW);
 
-            // Bulletproof pre-flight: make sure no previous winws is holding the
-            // WinDivert handle and that the kernel driver from a prior crash is
-            // fully unloaded before we launch a fresh instance. Without this the
-            // new winws crashes on the locked driver and the watchdog revive-loops.
-            kill_stray_winws();
-            if !teardown_windivert(Duration::from_secs(6)) {
-                return Err(anyhow::anyhow!(
-                    "WinDivert kernel driver is wedged and will not unload; refusing to spawn winws. A reboot is required."
-                ));
-            }
+            // NOTE: the WinDivert pre-flight (kill_stray_winws + teardown_windivert)
+            // is the caller's job now. It is a multi-second, blocking operation and
+            // used to run here synchronously on the tokio worker with the daemon
+            // state lock held; UnblockEngine drives it once per transition through
+            // spawn_blocking instead. See engine::reset_windivert_driver.
         }
 
         let child = cmd.spawn()
@@ -235,8 +230,14 @@ impl ProcessHandle {
         self.child.id()
     }
 
-    /// Terminate the child process and, on Windows, unload the WinDivert driver it
-    /// leaves resident so the next start is clean.
+    /// Terminate the child process and release its job object.
+    ///
+    /// This is deliberately cheap and non-blocking: it does NOT unload the
+    /// WinDivert driver winws leaves resident. Driver teardown is a slow,
+    /// blocking operation and is owned by UnblockEngine, which runs it exactly
+    /// once per stop/start transition off-thread (see reset_windivert_driver).
+    /// Doing it here as well meant kill() + Drop::drop() ran it twice back to
+    /// back for every handle.
     pub fn kill(&mut self) -> Result<()> {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -248,10 +249,6 @@ impl ProcessHandle {
                     windows_sys::Win32::Foundation::CloseHandle(job as windows_sys::Win32::Foundation::HANDLE);
                 }
             }
-            // TerminateProcess does not let winws remove its own driver; do it here
-            // and give it a bounded window to actually unload.
-            kill_stray_winws();
-            let _ = teardown_windivert(Duration::from_secs(5));
         }
         Ok(())
     }
