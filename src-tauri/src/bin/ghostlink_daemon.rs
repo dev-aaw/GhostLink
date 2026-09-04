@@ -574,19 +574,30 @@ async fn handle_unix_connection(stream: UnixStream, state: Arc<Mutex<DaemonState
             continue;
         }
 
-        let request: IpcRequest = match serde_json::from_str(trimmed) {
-            Ok(req) => req,
-            Err(e) => {
-                let err_resp = IpcResponse::Error {
-                    error: format!("Invalid JSON request: {}", e),
-                };
-                let mut out = serde_json::to_string(&err_resp)?;
-                out.push('\n');
-                writer.write_all(out.as_bytes()).await?;
-                writer.flush().await?;
-                line.clear();
-                continue;
-            }
+        // The peer-UID check above (getpeereid) is the Unix authentication
+        // boundary, matching the named-pipe DACL on Windows — no per-request
+        // token is verified here (get_token_path()'s file is never written by
+        // anything). But the real client (DaemonClient::send_request_inner)
+        // always wraps requests in IpcEnvelope { token, request }, so accepting
+        // only a bare IpcRequest here (as this line previously did) rejected
+        // every real call with "Invalid JSON request: missing field `type`" —
+        // is_daemon_alive() was always false and the CLI/menu bar silently fell
+        // back to standalone mode. Accept both shapes, envelope first, mirroring
+        // handle_pipe_connection's Windows-side lenient parsing.
+        let request: IpcRequest = if let Ok(envelope) = serde_json::from_str::<IpcEnvelope>(trimmed) {
+            envelope.request
+        } else if let Ok(req) = serde_json::from_str::<IpcRequest>(trimmed) {
+            req
+        } else {
+            let err_resp = IpcResponse::Error {
+                error: "Invalid JSON request".to_string(),
+            };
+            let mut out = serde_json::to_string(&err_resp)?;
+            out.push('\n');
+            writer.write_all(out.as_bytes()).await?;
+            writer.flush().await?;
+            line.clear();
+            continue;
         };
 
         let response = process_ipc_request(request, &state).await;
