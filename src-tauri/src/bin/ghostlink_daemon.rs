@@ -853,72 +853,85 @@ fn get_or_create_daemon_token() -> String {
 }
 
 #[cfg(windows)]
+const HOSTS_BLOCK_BEGIN: &str = "# >>> GhostLink managed hosts (do not edit inside this block) >>>";
+#[cfg(windows)]
+const HOSTS_BLOCK_END: &str = "# <<< GhostLink managed hosts <<<";
+
+/// Synchronize a small, marker-delimited block of hosts entries.
+///
+/// Design notes:
+///  * Only lines *between* the two markers are ever touched — a user's own hosts
+///    entries (including unrelated 162.159.* or discord lines) are never removed.
+///  * The Discord updater hosts (updates.discord.com, dl2.discordapp.net) are
+///    deliberately NOT pinned here. They live on rotating Google/Fastly IPs, and a
+///    stale pin is exactly what causes the "Checking for updates" hang. They are
+///    handled by the winws DPI-desync rule (list-discord.txt) + system DoH instead.
+///  * Only the DNS-poisoned Discord control-plane apexes get a Cloudflare pin, as a
+///    safety net for the brief window before system DoH is in effect.
+#[cfg(windows)]
 fn ensure_clean_hosts() {
     let hosts_path = r"C:\Windows\System32\drivers\etc\hosts";
-    let entries = [
+
+    // Discord's Cloudflare anycast address for the control plane (gateway / API / auth).
+    // These apexes are DNS-poisoned by TR ISPs; CDN / media / updater hosts are intentionally absent.
+    let managed: [&str; 4] = [
         "162.159.138.232 discord.com",
         "162.159.138.232 discord.gg",
         "162.159.138.232 discordapp.com",
-        "162.159.138.232 discordapp.net",
-        "162.159.138.232 updates.discord.com",
-        "162.159.138.232 discordcdn.com",
         "162.159.138.232 gateway.discord.gg",
-        "162.159.138.232 cdn.discordapp.com",
-        "162.159.138.232 media.discordapp.net",
-        "162.159.138.232 status.discord.com",
-        "162.159.138.232 router.discordapp.net",
-        "162.159.138.232 fingerprint.discord.com",
-        "162.159.138.232 remote-auth-gateway.discord.gg",
-        "34.126.226.51 dl2.discordapp.net",
-        "34.126.226.51 stable.dl2.discordapp.net",
-        "51.159.197.136 wikileaks.org",
-        "51.159.197.136 www.wikileaks.org",
     ];
 
-    if let Ok(content) = std::fs::read_to_string(hosts_path) {
-        // Strip legacy invalid entries that break dl2 (wrong IP) or WebRTC media
-        let mut cleaned_lines: Vec<String> = Vec::new();
-        let mut had_bad_entries = false;
-        for line in content.lines() {
-            let lower = line.to_lowercase();
-            if lower.contains("162.159.138.232 dl2") || lower.contains("discord.media") {
-                had_bad_entries = true;
-                continue;
-            }
-            cleaned_lines.push(line.to_string());
+    let content = std::fs::read_to_string(hosts_path).unwrap_or_default();
+
+    // Split out any previous GhostLink block, keeping everything else verbatim.
+    let mut kept: Vec<&str> = Vec::new();
+    let mut inside = false;
+    let mut had_block = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t == HOSTS_BLOCK_BEGIN {
+            inside = true;
+            had_block = true;
+            continue;
         }
-
-        let mut new_content = cleaned_lines.join("\r\n");
-        let mut modified = had_bad_entries;
-        let existing_lines: Vec<String> = cleaned_lines.clone();
-
-        for entry in &entries {
-            let domain = entry.split_whitespace().nth(1).unwrap_or("");
-            if domain.is_empty() {
-                continue;
-            }
-
-            // Word-boundary check: exact domain match on active non-comment lines
-            let already_present = existing_lines.iter().any(|line| {
-                let trimmed = line.trim();
-                if trimmed.starts_with('#') {
-                    return false;
-                }
-                trimmed.split_whitespace().skip(1).any(|host| host.eq_ignore_ascii_case(domain))
-            });
-
-            if !already_present {
-                if !new_content.ends_with('\n') && !new_content.is_empty() {
-                    new_content.push('\n');
-                }
-                new_content.push_str(&format!("{}\n", entry));
-                modified = true;
-            }
+        if t == HOSTS_BLOCK_END {
+            inside = false;
+            continue;
         }
-        if modified {
-            let _ = std::fs::write(hosts_path, new_content);
+        if !inside {
+            kept.push(line);
+        }
+    }
+
+    // Trim trailing blank lines from the preserved section for a clean append.
+    while matches!(kept.last(), Some(l) if l.trim().is_empty()) {
+        kept.pop();
+    }
+
+    let mut new_content = kept.join("\r\n");
+    new_content.push_str("\r\n");
+    new_content.push_str(HOSTS_BLOCK_BEGIN);
+    new_content.push_str("\r\n");
+    for e in &managed {
+        new_content.push_str(e);
+        new_content.push_str("\r\n");
+    }
+    new_content.push_str(HOSTS_BLOCK_END);
+    new_content.push_str("\r\n");
+
+    // Only write if the effective content changed (avoids a flush-dns storm on every boot).
+    let normalized_old = content.replace('\r', "");
+    let normalized_new = new_content.replace('\r', "");
+    if normalized_old != normalized_new {
+        if std::fs::write(hosts_path, &new_content).is_ok() {
             let _ = ghostlink_engine::silent_command("ipconfig.exe").arg("/flushdns").output();
-            println!("🛡️ [DNS] Clean hosts mappings synchronized for Discord & WikiLeaks.");
+            println!(
+                "🛡️ [DNS] GhostLink hosts block synchronized ({} entries, block {}).",
+                managed.len(),
+                if had_block { "refreshed" } else { "created" }
+            );
+        } else {
+            eprintln!("⚠️ [DNS] Could not write hosts file (permission?). Relying on DoH + DPI desync only.");
         }
     }
 }
