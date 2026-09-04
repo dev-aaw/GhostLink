@@ -207,12 +207,15 @@ mod windows_tray {
         let state_poller = state.clone();
         let client_poller = client.clone();
         rt.spawn(async move {
+            let mut tick: u64 = 0;
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
                 if !IS_RUNNING.load(Ordering::SeqCst) {
                     break;
                 }
+                tick += 1;
 
+                // Every tick (2s): daemon status over IPC — no child process.
                 let is_alive = client_poller.is_daemon_alive().await;
                 if is_alive {
                     if let Ok(status) = client_poller.get_status().await {
@@ -230,17 +233,21 @@ mod windows_tray {
                     st.is_gl_running = false;
                 }
 
-                let wg_name = {
-                    let st = state_poller.lock().unwrap();
-                    st.wireguard_tunnel_name.clone()
-                };
-                let is_wg = WireGuardManager::status(&wg_name) == WireGuardState::Connected;
-                let is_auto = AutoStartManager::is_enabled();
+                // Every ~10s only: WireGuard + autostart state. These shell out to
+                // netsh / sc / reg, so polling them every 2s was needless background churn.
+                if tick % 5 == 1 {
+                    let wg_name = {
+                        let st = state_poller.lock().unwrap();
+                        st.wireguard_tunnel_name.clone()
+                    };
+                    let is_wg = WireGuardManager::status(&wg_name) == WireGuardState::Connected;
+                    let is_auto = AutoStartManager::is_enabled();
 
-                {
-                    let mut st = state_poller.lock().unwrap();
-                    st.wireguard_connected = is_wg;
-                    st.autostart_enabled = is_auto;
+                    {
+                        let mut st = state_poller.lock().unwrap();
+                        st.wireguard_connected = is_wg;
+                        st.autostart_enabled = is_auto;
+                    }
                 }
             }
         });

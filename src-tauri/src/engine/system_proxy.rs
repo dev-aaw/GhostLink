@@ -162,33 +162,39 @@ impl SystemProxyManager {
         Ok(())
     }
 
-    /// Detect active physical network adapters on Windows.
-    /// Uses PowerShell Get-NetAdapter for locale-independent detection.
+    /// Detect active network adapters on Windows.
+    ///
+    /// Primary path is the IP Helper API (`GetAdaptersAddresses`) — zero process
+    /// spawn. This is polled by the daemon's transition monitor, so the old
+    /// "spawn powershell.exe every 30s" approach was pure background noise.
+    /// PowerShell / netsh remain only as fallbacks if the API yields nothing.
     pub fn detect_active_windows_adapters() -> Vec<String> {
         #[cfg(target_os = "windows")]
         {
-            let mut adapters = Vec::new();
+            let mut adapters = adapters_via_iphelper();
 
-            // Primary method: PowerShell Get-NetAdapter (locale-independent)
-            let ps_output = crate::engine::silent_command("powershell.exe")
-                .args([
-                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                    "-Command",
-                    "Get-NetAdapter -Physical | Where-Object {$_.Status -eq 'Up'} | Select-Object -ExpandProperty InterfaceAlias"
-                ])
-                .output();
+            // Fallback 1: PowerShell Get-NetAdapter (locale-independent)
+            if adapters.is_empty() {
+                let ps_output = crate::engine::silent_command("powershell.exe")
+                    .args([
+                        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                        "-Command",
+                        "Get-NetAdapter -Physical | Where-Object {$_.Status -eq 'Up'} | Select-Object -ExpandProperty InterfaceAlias"
+                    ])
+                    .output();
 
-            if let Ok(out) = ps_output {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                for line in stdout.lines() {
-                    let name = line.trim();
-                    if !name.is_empty() && !name.starts_with("Loopback") && !name.starts_with("wg") {
-                        adapters.push(name.to_string());
+                if let Ok(out) = ps_output {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    for line in stdout.lines() {
+                        let name = line.trim();
+                        if !name.is_empty() && !name.starts_with("Loopback") && !name.starts_with("wg") {
+                            adapters.push(name.to_string());
+                        }
                     }
                 }
             }
 
-            // Fallback: if PowerShell failed or returned empty, try netsh with multi-locale parsing
+            // Fallback 2: netsh with multi-locale parsing
             if adapters.is_empty() {
                 let output = crate::engine::silent_command("netsh.exe")
                     .args(["interface", "ipv4", "show", "interfaces"])
@@ -511,4 +517,75 @@ impl Drop for SystemProxyManager {
             let _ = self.restore_all_system_settings();
         }
     }
+}
+
+/// Enumerate "Up", non-loopback, non-tunnel adapters via the IP Helper API with no
+/// child process. Returns friendly names (e.g. "Wi-Fi", "Ethernet").
+#[cfg(target_os = "windows")]
+fn adapters_via_iphelper() -> Vec<String> {
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+        GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
+    };
+
+    const AF_UNSPEC: u32 = 0;
+    const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+    const IF_TYPE_TUNNEL: u32 = 131;
+    const IF_OPER_STATUS_UP: i32 = 1;
+
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    let mut size: u32 = 16 * 1024;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut adapters: Vec<String> = Vec::new();
+
+    unsafe {
+        for _ in 0..4 {
+            buf.resize(size as usize, 0);
+            let ret = GetAdaptersAddresses(
+                AF_UNSPEC,
+                flags,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+                &mut size,
+            );
+
+            if ret == ERROR_BUFFER_OVERFLOW {
+                continue; // `size` was updated with the required length; retry
+            }
+            if ret != ERROR_SUCCESS {
+                break;
+            }
+
+            let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+            while !cur.is_null() {
+                let a = &*cur;
+                if a.IfType != IF_TYPE_SOFTWARE_LOOPBACK
+                    && a.IfType != IF_TYPE_TUNNEL
+                    && a.OperStatus == IF_OPER_STATUS_UP
+                    && !a.FriendlyName.is_null()
+                {
+                    let mut len = 0usize;
+                    while *a.FriendlyName.add(len) != 0 {
+                        len += 1;
+                    }
+                    let name = String::from_utf16_lossy(std::slice::from_raw_parts(a.FriendlyName, len));
+                    let low = name.to_lowercase();
+                    if !name.is_empty()
+                        && !low.starts_with("loopback")
+                        && !low.starts_with("wg")
+                        && !low.contains("wireguard")
+                    {
+                        adapters.push(name);
+                    }
+                }
+                cur = a.Next;
+            }
+            break;
+        }
+    }
+
+    adapters.sort();
+    adapters.dedup();
+    adapters
 }

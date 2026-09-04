@@ -864,15 +864,32 @@ fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32)> {
     Ok((euid as u32, egid as u32))
 }
 
+/// Whether the current process token is elevated. This is polled on every Ping /
+/// GetStatus (the tray refreshes status every couple of seconds), so it must not
+/// spawn a child process — the old implementation ran `net.exe session` each call.
 #[cfg(windows)]
 fn is_windows_admin() -> bool {
-    let output = ghostlink_engine::silent_command("net.exe")
-        .args(["session"])
-        .output();
-    if let Ok(out) = output {
-        return out.status.success();
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut ret_len: u32 = 0;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut ret_len,
+        );
+        CloseHandle(token);
+        ok != 0 && elevation.TokenIsElevated != 0
     }
-    false
 }
 
 #[cfg(windows)]
