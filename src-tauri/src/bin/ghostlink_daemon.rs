@@ -49,12 +49,23 @@ async fn main() -> Result<()> {
 
     // 1. Initialize Engine State
     let config = EngineConfig::default();
+    #[cfg(target_os = "macos")]
+    let socks_port = config.socks_port;
     let engine = UnblockEngine::new(config);
     let state = Arc::new(Mutex::new(DaemonState {
         engine,
         active_strategy: None,
         start_time: Instant::now(),
     }));
+
+    // A fresh daemon owns no engine, so any SOCKS proxy still pointing at our
+    // loopback port is stale — left by a previous daemon that was SIGKILLed
+    // (e.g. launchd's shutdown timeout during a long AutoTune) before it could
+    // restore the network. launchd's KeepAlive would otherwise leave the user
+    // stuck: GUI says "stopped" while traffic dead-ends at an orphan tpws.
+    // Reconcile only when the proxy is provably ours (loopback + our port).
+    #[cfg(target_os = "macos")]
+    reconcile_stale_proxy(socks_port);
 
     #[cfg(unix)]
     {
@@ -127,8 +138,20 @@ async fn main() -> Result<()> {
                 }
             }
 
-            let mut st = state_for_signals.lock().await;
-            let _ = st.engine.stop().await;
+            // Do not let a busy state lock (an in-flight AutoTune) delay cleanup
+            // past launchd's kill window — that is how a stale proxy gets left
+            // behind. Try the graceful path briefly, then fall back to a
+            // best-effort network restore without the lock.
+            match tokio::time::timeout(std::time::Duration::from_secs(3), state_for_signals.lock()).await {
+                Ok(mut st) => {
+                    let _ = st.engine.stop().await;
+                }
+                Err(_) => {
+                    eprintln!("⚠️ State lock busy during shutdown — best-effort network restore without it.");
+                    #[cfg(target_os = "macos")]
+                    best_effort_proxy_off();
+                }
+            }
             if socket_for_signals.exists() {
                 let _ = fs::remove_file(&socket_for_signals);
             }
@@ -379,6 +402,82 @@ async fn main() -> Result<()> {
 
     #[allow(unreachable_code)]
     Ok(())
+}
+
+/// Turn off a SOCKS proxy on the primary service only when it is provably the
+/// one GhostLink set (loopback address + our port). Runs at daemon startup to
+/// recover from a previous instance that was killed before restoring the network.
+#[cfg(target_os = "macos")]
+fn reconcile_stale_proxy(socks_port: u16) {
+    use ghostlink_engine::engine::system_proxy as sp;
+
+    // The recorded service first (a network switch means it differs from the
+    // current primary, and the stale proxy sits on the recorded one), then the
+    // current primary service.
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(s) = sp::recorded_active_service() {
+        candidates.push(s);
+    }
+    if let Some(s) = sp::SystemProxyManager::detect_primary_macos_service() {
+        if !candidates.contains(&s) {
+            candidates.push(s);
+        }
+    }
+
+    let mut disabled_any = false;
+    for service in candidates {
+        let out = match std::process::Command::new("networksetup")
+            .args(["-getsocksfirewallproxy", &service])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (mut enabled, mut server, mut port) = (false, String::new(), String::new());
+        for line in text.lines() {
+            let l = line.trim();
+            if let Some(v) = l.strip_prefix("Enabled:") {
+                enabled = v.trim().eq_ignore_ascii_case("yes");
+            } else if let Some(v) = l.strip_prefix("Server:") {
+                server = v.trim().to_string();
+            } else if let Some(v) = l.strip_prefix("Port:") {
+                port = v.trim().to_string();
+            }
+        }
+        let is_loopback = server == "127.0.0.1" || server.eq_ignore_ascii_case("localhost");
+        if enabled && is_loopback && port == socks_port.to_string() {
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setsocksfirewallproxystate", &service, "off"])
+                .status();
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setdnsservers", &service, "Empty"])
+                .status();
+            println!("🧹 Startup reconcile: disabled stale GhostLink SOCKS proxy on [{}] (loopback:{} had no owning engine).", service, socks_port);
+            disabled_any = true;
+        }
+    }
+    if disabled_any {
+        sp::clear_recorded_service();
+    }
+}
+
+/// Best-effort SOCKS/DNS restore, mirroring the engine's own disable path.
+/// Only reached on shutdown when the state lock cannot be acquired in time.
+#[cfg(target_os = "macos")]
+fn best_effort_proxy_off() {
+    use ghostlink_engine::engine::system_proxy as sp;
+    let target = sp::recorded_active_service()
+        .or_else(sp::SystemProxyManager::detect_primary_macos_service);
+    if let Some(service) = target {
+        let _ = std::process::Command::new("networksetup")
+            .args(["-setsocksfirewallproxystate", &service, "off"])
+            .status();
+        let _ = std::process::Command::new("networksetup")
+            .args(["-setdnsservers", &service, "Empty"])
+            .status();
+    }
+    sp::clear_recorded_service();
 }
 
 #[cfg(unix)]
