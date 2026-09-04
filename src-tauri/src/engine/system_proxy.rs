@@ -24,16 +24,65 @@ use std::process::Command;
 #[cfg(target_os = "macos")]
 const ACTIVE_SERVICE_FILE: &str = "/Library/Application Support/GhostLink/active_service";
 
+/// Security: `/Library/Application Support` is `root:admin`, group-writable, so
+/// any local user in the admin group (the common case for a Mac's primary
+/// account) can delete the `GhostLink` subdir `service install` created and
+/// replace it with a symlink to an arbitrary directory. Without the checks
+/// below, the root daemon would `create_dir_all()` straight through that
+/// symlink and write `active_service` wherever the attacker pointed — a local
+/// root file-write primitive. Same defense pattern as `ipc.rs`'s
+/// `is_trusted_socket()` and `process.rs`'s log-file open: verify with
+/// `symlink_metadata` (never follows the final component) before touching
+/// anything, and close the remaining TOCTOU on the leaf file with `O_NOFOLLOW`
+/// at open time.
 #[cfg(target_os = "macos")]
 pub fn record_active_service(service: &str) {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
     let path = std::path::Path::new(ACTIVE_SERVICE_FILE);
-    if let Some(parent) = path.parent() {
-        // Succeeds for root (production daemon); a harmless no-op otherwise.
-        let _ = std::fs::create_dir_all(parent);
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let parent_is_plain_dir = |p: &std::path::Path| {
+        matches!(std::fs::symlink_metadata(p), Ok(meta) if meta.file_type().is_dir() && !meta.file_type().is_symlink())
+    };
+
+    if !parent_is_plain_dir(parent) {
+        // Parent missing entirely (first run before `service install`) is fine
+        // to create; anything else that already exists there and isn't a plain
+        // directory (in particular, a symlink) is refused outright.
+        if std::fs::symlink_metadata(parent).is_ok() {
+            eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: parent is not a plain directory");
+            return;
+        }
+        if std::fs::create_dir_all(parent).is_err() || !parent_is_plain_dir(parent) {
+            eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: could not create a plain parent directory");
+            return;
+        }
     }
-    if std::fs::write(path, service.as_bytes()).is_ok() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: target is a symlink");
+            return;
+        }
+    }
+
+    // O_NOFOLLOW closes the window between the check above and this open: if a
+    // symlink appears at `path` in between, the open fails (ELOOP) instead of
+    // writing through it.
+    match std::fs::OpenOptions::new().write(true).create(true).truncate(true).custom_flags(libc::O_NOFOLLOW).open(path) {
+        Ok(mut f) => {
+            use std::io::Write;
+            if f.write_all(service.as_bytes()).is_ok() {
+                let _ = f.set_permissions(std::fs::Permissions::from_mode(0o644));
+            }
+        }
+        Err(e) => {
+            eprintln!("⚠️ SECURITY: Refusing to write {ACTIVE_SERVICE_FILE}: {e}");
+        }
     }
 }
 
