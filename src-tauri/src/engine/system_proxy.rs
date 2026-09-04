@@ -109,7 +109,18 @@ pub struct SystemProxyManager {
 impl SystemProxyManager {
     pub fn new(socks_port: u16) -> Self {
         Self {
-            active_service: Self::detect_primary_macos_service(),
+            // Deliberately None, not a pre-fetched detect_primary_macos_service()
+            // guess: `active_service` means "the service GhostLink is known to
+            // have enabled the proxy on", and disable_macos_proxy() /
+            // restore_all_system_settings() treat any Some here as "there is
+            // something of ours to tear down". Pre-populating it with a guess at
+            // construction time meant stop() (which always calls
+            // restore_all_system_settings(), independent of apply_system_proxy)
+            // would disable whichever service happened to be primary even when
+            // enable_macos_proxy() was never called — silently clobbering a
+            // proxy GhostLink never touched. It is set for real only on a
+            // successful enable_macos_proxy().
+            active_service: None,
             socks_port,
             proxy_is_active: false,
         }
@@ -241,11 +252,17 @@ impl SystemProxyManager {
     pub fn disable_macos_proxy(&mut self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            // Prefer the service the proxy was actually enabled on (recorded to
-            // disk), then this instance's memory, then a fresh detection.
-            let target = recorded_active_service()
-                .or_else(|| self.active_service.clone())
-                .or_else(Self::detect_primary_macos_service);
+            // Only a service GhostLink itself is known to have enabled — recorded
+            // to disk, or remembered in this instance's memory — is a valid
+            // teardown target. There is deliberately NO fallback to
+            // detect_primary_macos_service() here: that would disable whatever
+            // SOCKS proxy/DNS happens to be configured on the primary service
+            // right now even when GhostLink never touched it (apply_system_proxy
+            // was false, enable failed before recording, or this call is not
+            // paired with any enable at all) — silently clobbering a proxy that
+            // could belong to the user or to an unrelated process. Absence of a
+            // recorded/remembered service means there is nothing to restore.
+            let target = recorded_active_service().or_else(|| self.active_service.clone());
 
             if let Some(ref service) = target {
                 println!("🌐 Disabling macOS SOCKS proxy and restoring network settings on [{}]...", service);

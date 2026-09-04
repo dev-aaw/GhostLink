@@ -512,11 +512,14 @@ fn reconcile_stale_proxy(socks_port: u16) {
 
 /// Best-effort SOCKS/DNS restore, mirroring the engine's own disable path.
 /// Only reached on shutdown when the state lock cannot be acquired in time.
+/// No detect_primary_macos_service() fallback: only a recorded service means
+/// the daemon's engine actually enabled the system proxy at some point; absent
+/// a record there is nothing of ours to tear down, and guessing the primary
+/// service would disable a proxy GhostLink never touched.
 #[cfg(target_os = "macos")]
 fn best_effort_proxy_off() {
     use ghostlink_engine::engine::system_proxy as sp;
-    let target = sp::recorded_active_service()
-        .or_else(sp::SystemProxyManager::detect_primary_macos_service);
+    let target = sp::recorded_active_service();
     if let Some(service) = target {
         let _ = std::process::Command::new("networksetup")
             .args(["-setsocksfirewallproxystate", &service, "off"])

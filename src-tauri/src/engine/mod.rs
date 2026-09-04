@@ -318,8 +318,13 @@ impl UnblockEngine {
 
                 if watchdog_flag.swap(false, SeqCst) {
                     eprintln!("\n🚨 EMERGENCY WATCHDOG TRIGGERED: proxy port {} down for {} consecutive checks. Restoring system network settings...", socks_port, MAX_CONSECUTIVE_FAILURES);
-                    let target = crate::engine::system_proxy::recorded_active_service()
-                        .or_else(SystemProxyManager::detect_primary_macos_service);
+                    // No detect_primary_macos_service() fallback: only a
+                    // recorded service means this run actually enabled the
+                    // system proxy. Without a record (apply_system_proxy was
+                    // false; the watchdog still arms and probes regardless),
+                    // there is nothing of ours to tear down and guessing the
+                    // primary service would disable someone else's proxy.
+                    let target = crate::engine::system_proxy::recorded_active_service();
                     if let Some(service) = target {
                         let _ = std::process::Command::new("networksetup")
                             .args(["-setsocksfirewallproxystate", &service, "off"])
