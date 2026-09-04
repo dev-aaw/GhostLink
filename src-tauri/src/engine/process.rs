@@ -88,11 +88,20 @@ pub struct ProcessHandle {
     _job_handle: Option<isize>,
     pub binary_path: std::path::PathBuf,
     pub args: Vec<String>,
+    /// Shared slot this handle's PID is published into (and cleared from on
+    /// kill/Drop). Centralizing the publish/clear here — rather than making
+    /// every caller remember to update it — is what lets ANY code path that
+    /// spawns a ProcessHandle (the real engine's start(), but also
+    /// test_strategy()'s short-lived benchmark process) be found and killed by
+    /// a shutdown path that only has the shared slot, not this handle.
+    pid_slot: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl ProcessHandle {
-    /// Spawn the DPI engine process (tpws or winws) with the specified arguments.
-    pub fn spawn(exe_path: &Path, args: &[String]) -> Result<Self> {
+    /// Spawn the DPI engine process (tpws or winws) with the specified
+    /// arguments, publishing its PID into `pid_slot` for the duration it's
+    /// alive (cleared back to 0 on kill/Drop).
+    pub fn spawn(exe_path: &Path, args: &[String], pid_slot: std::sync::Arc<std::sync::atomic::AtomicU32>) -> Result<Self> {
         let mut cmd = Command::new(exe_path);
         cmd.args(args);
 
@@ -220,12 +229,15 @@ impl ProcessHandle {
             }
         };
 
+        pid_slot.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+
         Ok(Self {
             child,
             #[cfg(target_os = "windows")]
             _job_handle: job_handle,
             binary_path: exe_path.to_path_buf(),
             args: args.to_vec(),
+            pid_slot,
         })
     }
 
@@ -252,6 +264,17 @@ impl ProcessHandle {
     pub fn kill(&mut self) -> Result<()> {
         let _ = self.child.kill();
         let _ = self.child.wait();
+
+        // Only clear the shared slot if it still holds *our* PID: a newer
+        // handle may already have overwritten it (e.g. this handle is being
+        // dropped after its owner already spawned a replacement), and this
+        // handle's cleanup must not stomp that.
+        let _ = self.pid_slot.compare_exchange(
+            self.child.id(),
+            0,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
 
         #[cfg(target_os = "windows")]
         {

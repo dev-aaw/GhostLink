@@ -91,9 +91,14 @@ pub struct UnblockEngine {
     probe_runner: ProbeRunner,
     active_process: Option<ProcessHandle>,
     watchdog_running: Arc<AtomicBool>,
-    /// PID of the live engine child (tpws / winws), or 0. Kept outside the
-    /// daemon's state Mutex so a shutdown path that cannot acquire the lock can
-    /// still kill the child instead of orphaning it on the SOCKS port.
+    /// PID of whichever engine child (tpws / winws) `ProcessHandle::spawn` most
+    /// recently published here, or 0 — set on spawn and cleared on kill/Drop by
+    /// `ProcessHandle` itself (see its `pid_slot` field), not by callers. This
+    /// covers every spawn site through this engine instance, including
+    /// `test_strategy()`'s short-lived AutoTune benchmark process, not just the
+    /// long-lived one in `active_process`. Kept outside the daemon's state
+    /// Mutex so a shutdown path that cannot acquire the lock can still kill
+    /// whatever is currently running instead of orphaning it on the SOCKS port.
     active_engine_pid: Arc<AtomicU32>,
 }
 
@@ -203,8 +208,7 @@ impl UnblockEngine {
         }
 
         println!("🚀 Launching engine with strategy: [{}]", strategy.name);
-        let proc = ProcessHandle::spawn(&exe_path, &strategy.args)?;
-        self.active_engine_pid.store(proc.id(), std::sync::atomic::Ordering::SeqCst);
+        let proc = ProcessHandle::spawn(&exe_path, &strategy.args, self.active_engine_pid.clone())?;
         self.active_process = Some(proc);
 
         // Give the process a brief moment to initialize its socket/driver
@@ -342,7 +346,8 @@ impl UnblockEngine {
     /// Stops the running engine and restores system settings.
     pub async fn stop(&mut self) -> Result<()> {
         self.watchdog_running.store(false, std::sync::atomic::Ordering::SeqCst);
-        self.active_engine_pid.store(0, std::sync::atomic::Ordering::SeqCst);
+        // active_engine_pid is cleared by ProcessHandle::kill() below, not here
+        // directly — see the struct doc comment on active_engine_pid.
 
         let active_pid = if let Some(mut proc) = self.active_process.take() {
             let pid = proc.id();
@@ -387,9 +392,8 @@ impl UnblockEngine {
     pub async fn mark_faulted(&mut self, reason: impl Into<String>) {
         let reason = reason.into();
         self.watchdog_running.store(false, std::sync::atomic::Ordering::SeqCst);
-        self.active_engine_pid.store(0, std::sync::atomic::Ordering::SeqCst);
         if let Some(mut proc) = self.active_process.take() {
-            let _ = proc.kill();
+            let _ = proc.kill(); // also clears active_engine_pid
         }
         let _ = self.proxy_mgr.restore_all_system_settings();
         self.state = EngineState::Faulted(reason);
@@ -423,7 +427,10 @@ impl UnblockEngine {
             }
         }
 
-        let mut proc = ProcessHandle::spawn(&exe_path, &strategy.args)?;
+        // Published into active_engine_pid for the lifetime of this benchmark
+        // process too (not just the real engine's long-lived one), so a daemon
+        // shutdown mid-AutoTune can find and kill it — see the field doc.
+        let mut proc = ProcessHandle::spawn(&exe_path, &strategy.args, self.active_engine_pid.clone())?;
         sleep(Duration::from_millis(700)).await;
 
         if !proc.is_alive() {
