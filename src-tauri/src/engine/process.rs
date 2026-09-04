@@ -1,6 +1,86 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "windows")]
+use std::time::{Duration, Instant};
+
+/// Candidate service names the WinDivert kernel driver can be registered under,
+/// across Flowseal / zapret / GoodbyeDPI builds and driver versions. `winws.exe`
+/// installs the driver on first use and (on a clean exit) removes it; a crash
+/// leaves it resident and the next `winws` then fails with ERROR_ACCESS_DENIED
+/// or "driver already loaded", which is the classic revive-loop trigger.
+#[cfg(target_os = "windows")]
+pub const WINDIVERT_SERVICE_NAMES: &[&str] = &["WinDivert", "WinDivert14", "windivert", "WinDivert1.4"];
+
+/// True if any WinDivert service is still registered and not fully stopped.
+#[cfg(target_os = "windows")]
+pub fn windivert_is_resident() -> bool {
+    for name in WINDIVERT_SERVICE_NAMES {
+        if let Ok(out) = crate::engine::silent_command("sc.exe").args(["query", name]).output() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            // 1060 == ERROR_SERVICE_DOES_NOT_EXIST -> definitively gone
+            if s.contains("1060") {
+                continue;
+            }
+            if s.contains("RUNNING") || s.contains("START_PENDING") || s.contains("STOP_PENDING") || s.contains("PAUSED") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Force any stray `winws.exe` to exit and wait (bounded) for the process list to clear.
+#[cfg(target_os = "windows")]
+pub fn kill_stray_winws() {
+    let _ = crate::engine::silent_command("taskkill.exe")
+        .args(["/F", "/T", "/IM", "winws.exe"])
+        .status();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        match crate::engine::silent_command("tasklist.exe")
+            .args(["/FI", "IMAGENAME eq winws.exe", "/NH"])
+            .output()
+        {
+            Ok(out) => {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if !s.to_lowercase().contains("winws.exe") {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Stop, wait for, and delete every WinDivert service variant. Returns `true` when
+/// the driver is confirmed fully unloaded, `false` if something is still wedged
+/// after `timeout` (the caller should then treat the engine as Faulted rather
+/// than spinning up another `winws`).
+#[cfg(target_os = "windows")]
+pub fn teardown_windivert(timeout: Duration) -> bool {
+    for name in WINDIVERT_SERVICE_NAMES {
+        let _ = crate::engine::silent_command("net.exe").args(["stop", name]).output();
+        let _ = crate::engine::silent_command("sc.exe").args(["stop", name]).output();
+    }
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        // Attempt deletion each pass; harmless once already gone.
+        for name in WINDIVERT_SERVICE_NAMES {
+            let _ = crate::engine::silent_command("sc.exe").args(["delete", name]).output();
+        }
+        if !windivert_is_resident() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
 
 pub struct ProcessHandle {
     child: Child,
@@ -72,11 +152,16 @@ impl ProcessHandle {
             const CREATE_NO_WINDOW: u32 = 0x08000000;
             cmd.creation_flags(CREATE_NO_WINDOW);
 
-            // Clean any stale WinDivert kernel services from prior crashes/tools
-            let _ = crate::engine::silent_command("net.exe").args(["stop", "WinDivert"]).status();
-            let _ = crate::engine::silent_command("net.exe").args(["stop", "WinDivert14"]).status();
-            let _ = crate::engine::silent_command("sc.exe").args(["delete", "WinDivert"]).status();
-            let _ = crate::engine::silent_command("sc.exe").args(["delete", "WinDivert14"]).status();
+            // Bulletproof pre-flight: make sure no previous winws is holding the
+            // WinDivert handle and that the kernel driver from a prior crash is
+            // fully unloaded before we launch a fresh instance. Without this the
+            // new winws crashes on the locked driver and the watchdog revive-loops.
+            kill_stray_winws();
+            if !teardown_windivert(Duration::from_secs(6)) {
+                return Err(anyhow::anyhow!(
+                    "WinDivert kernel driver is wedged and will not unload; refusing to spawn winws. A reboot is required."
+                ));
+            }
         }
 
         let child = cmd.spawn()
@@ -150,15 +235,23 @@ impl ProcessHandle {
         self.child.id()
     }
 
-    /// Terminate the child process immediately.
+    /// Terminate the child process and, on Windows, unload the WinDivert driver it
+    /// leaves resident so the next start is clean.
     pub fn kill(&mut self) -> Result<()> {
         let _ = self.child.kill();
         let _ = self.child.wait();
+
         #[cfg(target_os = "windows")]
-        if let Some(job) = self._job_handle.take() {
-            unsafe {
-                windows_sys::Win32::Foundation::CloseHandle(job as windows_sys::Win32::Foundation::HANDLE);
+        {
+            if let Some(job) = self._job_handle.take() {
+                unsafe {
+                    windows_sys::Win32::Foundation::CloseHandle(job as windows_sys::Win32::Foundation::HANDLE);
+                }
             }
+            // TerminateProcess does not let winws remove its own driver; do it here
+            // and give it a bounded window to actually unload.
+            kill_stray_winws();
+            let _ = teardown_windivert(Duration::from_secs(5));
         }
         Ok(())
     }

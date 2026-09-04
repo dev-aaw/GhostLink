@@ -44,6 +44,24 @@ pub fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Co
     cmd
 }
 
+/// Best-effort tail of the winws engine log, used to attach a concrete reason when
+/// the process dies on startup instead of the opaque "crashed on startup".
+#[cfg(target_os = "windows")]
+fn read_engine_log_tail(lines: usize) -> String {
+    let pdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+    let log_path = std::path::PathBuf::from(pdata).join("GhostLink").join("logs").join("engine.log");
+    let Ok(content) = std::fs::read_to_string(&log_path) else {
+        return String::new();
+    };
+    let tail: Vec<&str> = content
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(lines)
+        .collect();
+    tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+}
+
 pub struct UnblockEngine {
     config: EngineConfig,
     state: EngineState,
@@ -172,8 +190,15 @@ impl UnblockEngine {
         {
             if let Some(ref mut p) = self.active_process {
                 if !p.is_alive() {
+                    let detail = read_engine_log_tail(6);
                     let _ = self.stop().await;
-                    return Err(anyhow!("winws.exe process failed to launch or crashed on startup"));
+                    let msg = if detail.is_empty() {
+                        "winws.exe crashed on startup (no log output)".to_string()
+                    } else {
+                        format!("winws.exe crashed on startup: {}", detail)
+                    };
+                    self.state = EngineState::Error(msg.clone());
+                    return Err(anyhow!(msg));
                 }
             }
             println!("✅ WinDivert kernel packet filter active & transparently desyncing L3/L4 TCP & UDP traffic.");
@@ -184,14 +209,16 @@ impl UnblockEngine {
             port: self.config.socks_port,
         };
 
-        // 3. Start Active Emergency Watchdog
-        let socks_port = self.config.socks_port;
+        // 3. Start Active Emergency Watchdog.
+        //    On Windows the daemon owns health/revival (via check_health + a rolling
+        //    circuit breaker), so this internal loop is macOS-only — spawning it on
+        //    Windows just leaked an idle task that spun until stop().
         let watchdog_flag = self.watchdog_running.clone();
         watchdog_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        let exe_path_clone = self.binary_mgr.get_executable_path();
-        let strategy_args_clone = strategy.args.clone();
-        let strategy_name_clone = strategy.name.clone();
+        #[cfg(target_os = "macos")]
+        let socks_port = self.config.socks_port;
 
+        #[cfg(target_os = "macos")]
         tokio::spawn(async move {
             while watchdog_flag.load(std::sync::atomic::Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -199,7 +226,6 @@ impl UnblockEngine {
                     break;
                 }
 
-                #[cfg(target_os = "macos")]
                 {
                     // Actively probe localhost port with timeout
                     let check = tokio::time::timeout(
@@ -207,10 +233,7 @@ impl UnblockEngine {
                         tokio::net::TcpStream::connect(("127.0.0.1", socks_port)),
                     ).await;
 
-                    let port_ok = match check {
-                        Ok(Ok(_)) => true,
-                        _ => false,
-                    };
+                    let port_ok = matches!(check, Ok(Ok(_)));
 
                     if !port_ok {
                         if watchdog_flag.swap(false, std::sync::atomic::Ordering::SeqCst) {
@@ -231,17 +254,6 @@ impl UnblockEngine {
                             break;
                         }
                     }
-                }
-
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = socks_port;
-                    let _ = &exe_path_clone;
-                    let _ = &strategy_args_clone;
-                    let _ = &strategy_name_clone;
-                    // The daemon's external watchdog monitors health via check_health()
-                    // and handles revival properly through engine.start().
-                    // This internal loop is only needed on macOS for SOCKS port probing.
                 }
             }
         });
@@ -281,6 +293,27 @@ impl UnblockEngine {
 
         self.state = EngineState::Stopped;
         Ok(())
+    }
+
+    /// Put the engine into the unrecoverable Faulted state: stop everything, restore
+    /// system settings, and record why. The daemon watchdog calls this after it has
+    /// exhausted its revival budget (a wedged WinDivert driver that a reboot must clear).
+    pub async fn mark_faulted(&mut self, reason: impl Into<String>) {
+        let reason = reason.into();
+        self.watchdog_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(mut proc) = self.active_process.take() {
+            let _ = proc.kill();
+        }
+        let _ = self.proxy_mgr.restore_all_system_settings();
+        self.state = EngineState::Faulted(reason);
+    }
+
+    /// Clear a Faulted state back to Stopped (e.g. after the user reboots and the
+    /// daemon restarts, or an explicit manual reset).
+    pub fn clear_faulted(&mut self) {
+        if matches!(self.state, EngineState::Faulted(_)) {
+            self.state = EngineState::Stopped;
+        }
     }
 
     /// Benchmark test a specific strategy.
@@ -352,6 +385,20 @@ impl UnblockEngine {
 
         for (idx, strat) in strategies.iter().enumerate() {
             progress_cb(idx + 1, total, strat, None);
+
+            // Between benchmark spawns, make sure the previous winws is gone and the
+            // WinDivert driver has fully unloaded before the next one grabs the handle.
+            #[cfg(target_os = "windows")]
+            {
+                if crate::engine::process::windivert_is_resident() {
+                    let cleared = crate::engine::process::teardown_windivert(std::time::Duration::from_secs(6));
+                    if !cleared {
+                        println!("⛔ [AutoTune] WinDivert driver wedged; aborting benchmark early. A reboot is required.");
+                        break;
+                    }
+                }
+                sleep(Duration::from_millis(400)).await;
+            }
 
             match self.test_strategy(strat).await {
                 Ok(summary) => {

@@ -221,15 +221,24 @@ async fn main() -> Result<()> {
             }
         });
 
-        // 3. Resilience Watchdog & Network Transition Monitor with Crash Circuit Breaker
+        // 3. Resilience Watchdog & Network Transition Monitor with a bounded circuit breaker.
+        //
+        //    Revival budget: REVIVAL_LIMIT restarts inside REVIVAL_WINDOW. Cross that and
+        //    the driver is genuinely wedged — we stop trying, mark the engine Faulted,
+        //    and tell the user a reboot is required (instead of spinning winws forever).
         let state_for_watchdog = Arc::clone(&state);
         tokio::spawn(async move {
+            use std::time::{Duration, Instant};
+            const REVIVAL_WINDOW: Duration = Duration::from_secs(300);
+            const REVIVAL_LIMIT: usize = 6;
+
             let mut last_adapters = ghostlink_engine::SystemProxyManager::detect_active_windows_adapters();
-            let mut consecutive_crashes = 0;
+            let mut revival_times: Vec<Instant> = Vec::new();
+            let mut tried_fallback = false;
             let mut iteration = 0u64;
 
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+                tokio::time::sleep(Duration::from_millis(5000)).await;
                 iteration += 1;
 
                 // Watchdog Check
@@ -238,34 +247,73 @@ async fn main() -> Result<()> {
                     if st.engine.is_running() && !st.engine.check_health() {
                         (true, st.active_strategy.clone())
                     } else {
-                        consecutive_crashes = 0; // Reset crash counter if healthy
+                        if st.engine.is_running() {
+                            // Healthy run — decay the revival history so a later, unrelated
+                            // blip doesn't inherit an old strike count.
+                            revival_times.clear();
+                            tried_fallback = false;
+                        }
                         (false, None)
                     }
                 };
 
                 if needs_revival {
-                    consecutive_crashes += 1;
-                    if consecutive_crashes <= 3 {
-                        if let Some(strat) = strat_to_revive {
-                            ghostlink_engine::log_warn!("Detected winws crash/stop (attempt {}/3)! Reviving engine with [{}]...", consecutive_crashes, strat.name);
+                    let now = Instant::now();
+                    revival_times.retain(|t| now.duration_since(*t) < REVIVAL_WINDOW);
+                    revival_times.push(now);
+                    let strikes = revival_times.len();
+
+                    if strikes >= REVIVAL_LIMIT {
+                        ghostlink_engine::log_error!(
+                            "winws revival budget exhausted ({}/{} in {}s). WinDivert appears wedged — marking engine Faulted; a reboot is required.",
+                            strikes, REVIVAL_LIMIT, REVIVAL_WINDOW.as_secs()
+                        );
+                        {
                             let mut st = state_for_watchdog.lock().await;
-                            let _ = st.engine.start(&strat).await;
-                            ghostlink_engine::log_info!("winws revived with strategy [{}].", strat.name);
+                            st.engine.mark_faulted(
+                                "WinDivert kernel driver is wedged after repeated restart attempts. Please reboot Windows to recover GhostLink."
+                            ).await;
                         }
-                    } else if consecutive_crashes == 4 {
-                        // Circuit Breaker: Try fallback Superonline / Turkcell strategy once
-                        ghostlink_engine::log_error!("Repeated winws crashes detected (3+). Attempting fallback to [win-superonline]...");
+                        ghostlink_engine::notify(
+                            "GhostLink — Yeniden Başlatma Gerekli",
+                            "Ağ sürücüsü (WinDivert) kilitlendi ve GhostLink kendini onaramıyor. Lütfen bilgisayarınızı yeniden başlatın; açılışta otomatik düzelecektir.",
+                        );
+                        // Stop watching. On the next boot the daemon starts fresh (state = Stopped)
+                        // and AutoStart brings the engine back up on a clean driver.
+                        break;
+                    } else if strikes <= 3 {
+                        if let Some(strat) = strat_to_revive {
+                            ghostlink_engine::log_warn!("Detected winws crash/stop (strike {}/{})! Reviving with [{}]...", strikes, REVIVAL_LIMIT, strat.name);
+                            let mut st = state_for_watchdog.lock().await;
+                            match st.engine.start(&strat).await {
+                                Ok(()) => ghostlink_engine::log_info!("winws revived with strategy [{}].", strat.name),
+                                Err(e) => ghostlink_engine::log_error!("Revival start failed: {}", e),
+                            }
+                        }
+                    } else if !tried_fallback {
+                        // One-shot: switch to an ISP-hardened fallback strategy.
+                        tried_fallback = true;
+                        ghostlink_engine::log_error!("Repeated winws crashes (strike {}). One-shot fallback to [win-superonline]/[win-alt]...", strikes);
                         let mut st = state_for_watchdog.lock().await;
                         let list = st.engine.list_strategies();
                         if let Some(fallback) = list.into_iter().find(|s| s.id == "win-superonline" || s.id == "win-alt") {
-                            let _ = st.engine.start(&fallback).await;
-                            st.active_strategy = Some(fallback.clone());
-                            let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&fallback.id);
+                            match st.engine.start(&fallback).await {
+                                Ok(()) => {
+                                    st.active_strategy = Some(fallback.clone());
+                                    let _ = ghostlink_engine::StrategyConfigManager::save_selected_strategy(&fallback.id);
+                                }
+                                Err(e) => ghostlink_engine::log_error!("Fallback start failed: {}", e),
+                            }
                         }
                     } else {
-                        // Back off heavily to prevent CPU and window flicker loops
-                        ghostlink_engine::log_warn!("Circuit breaker active: winws unstable. Waiting 30s before next health check.");
-                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                        // Strikes 4..LIMIT after the fallback was already tried: brief backoff,
+                        // then keep reviving the current strategy until the budget runs out.
+                        ghostlink_engine::log_warn!("winws still unstable (strike {}/{}); backing off 15s.", strikes, REVIVAL_LIMIT);
+                        tokio::time::sleep(Duration::from_secs(15)).await;
+                        if let Some(strat) = strat_to_revive {
+                            let mut st = state_for_watchdog.lock().await;
+                            let _ = st.engine.start(&strat).await;
+                        }
                     }
                 }
 
@@ -463,6 +511,12 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
                 (None, None, None)
             };
 
+            let engine_state = st.engine.state().to_string();
+            let faulted_reason = match st.engine.state() {
+                EngineState::Faulted(reason) => Some(reason.clone()),
+                _ => None,
+            };
+
             IpcResponse::Status(DaemonStatusInfo {
                 is_running,
                 active_strategy_id: strat_id,
@@ -472,6 +526,8 @@ async fn process_ipc_request(request: IpcRequest, state: &Arc<Mutex<DaemonState>
                 daemon_pid: std::process::id(),
                 is_root,
                 uptime_secs: uptime,
+                engine_state,
+                faulted_reason,
             })
         }
 

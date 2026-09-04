@@ -74,6 +74,10 @@ pub enum EngineState {
     Running { strategy_name: String, port: u16 },
     AutoTuning { current: usize, total: usize, candidate: String },
     Error(String),
+    /// Unrecoverable: winws could not be kept alive after repeated revival attempts
+    /// (typically a wedged WinDivert kernel driver). The watchdog has given up and a
+    /// reboot is required. Carries a human-readable reason.
+    Faulted(String),
 }
 
 impl fmt::Display for EngineState {
@@ -88,6 +92,7 @@ impl fmt::Display for EngineState {
                 write!(f, "AutoTuning [{}/{}] testing {}", current, total, candidate)
             }
             EngineState::Error(err) => write!(f, "Error: {}", err),
+            EngineState::Faulted(reason) => write!(f, "Faulted (reboot required): {}", reason),
         }
     }
 }

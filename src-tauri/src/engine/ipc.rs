@@ -131,6 +131,13 @@ pub struct DaemonStatusInfo {
     pub daemon_pid: u32,
     pub is_root: bool,
     pub uptime_secs: u64,
+    /// Human-readable engine state ("Stopped", "Running (...)", "Faulted (reboot required): ...").
+    /// Older clients that don't send/expect this still deserialize via the default.
+    #[serde(default)]
+    pub engine_state: String,
+    /// Set when the engine has entered the unrecoverable Faulted state and a reboot is needed.
+    #[serde(default)]
+    pub faulted_reason: Option<String>,
 }
 
 /// IPC client to interact with running ghostlink_daemon.
