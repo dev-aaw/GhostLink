@@ -42,7 +42,10 @@ mod macos_app {
     static APP_CTX: std::sync::Mutex<Option<AppContext>> = std::sync::Mutex::new(None);
 
     fn with_app_ctx<R, F: FnOnce(&mut AppContext) -> R>(f: F) -> R {
-        let mut guard = APP_CTX.lock().expect("Failed to lock APP_CTX");
+        // Recover from a poisoned lock: a panic inside one menu handler must not
+        // permanently brick every subsequent menu interaction while the process
+        // (and its status-bar item) linger on, apparently alive but inert.
+        let mut guard = APP_CTX.lock().unwrap_or_else(|e| e.into_inner());
         let ctx = guard.as_mut().expect("APP_CTX not initialized");
         f(ctx)
     }
@@ -65,9 +68,19 @@ mod macos_app {
                 (false, ctx.active_strategy.clone())
             });
 
-            // 2. Query WireGuard Tunnels Status (Mutual Exclusion)
-            let is_daily_connected = WireGuardManager::status("wg0-daily") == WireGuardState::Connected;
-            let is_full_connected = WireGuardManager::status("wg0-mac") == WireGuardState::Connected;
+            // 2. Query WireGuard Tunnels Status (Mutual Exclusion).
+            // One `scutil --nc list` covers both tunnels instead of two
+            // `scutil --nc status` forks on the AppKit main thread per open.
+            let wg_tunnels = WireGuardManager::list_tunnels();
+            let wg_state = |name: &str| {
+                wg_tunnels
+                    .iter()
+                    .find(|t| t.name == name)
+                    .map(|t| t.state.clone())
+                    .unwrap_or(WireGuardState::Disconnected)
+            };
+            let is_daily_connected = wg_state("wg0-daily") == WireGuardState::Connected;
+            let is_full_connected = wg_state("wg0-mac") == WireGuardState::Connected;
 
             // 3. Query Learned Fallback Routes
             let route_count = SmartRouter::load_routes().len();
@@ -513,7 +526,7 @@ mod macos_app {
                 item_autostart,
             };
 
-            *APP_CTX.lock().unwrap() = Some(ctx);
+            *APP_CTX.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx);
 
             update_menu_ui();
 
