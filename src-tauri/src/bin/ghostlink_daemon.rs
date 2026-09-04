@@ -58,10 +58,16 @@ async fn main() -> Result<()> {
         start_time: Instant::now(),
     }));
 
-    // Grab the engine-child PID handle now, while the lock is uncontended, so the
-    // shutdown-timeout path can kill an orphaned tpws without the state lock.
+    // Grab both engine-child PID handles now, while the lock is uncontended, so
+    // the shutdown-timeout path can kill an orphaned tpws without the state
+    // lock. Two separate handles because the real engine (engine_pid_handle)
+    // and a `test_strategy()` benchmark run (benchmark_pid_handle) can be alive
+    // at the same time — IpcRequest::TestStrategy does not stop() the real
+    // engine first, by design, so they must never share a slot.
     #[cfg(unix)]
     let engine_pid = { state.lock().await.engine.engine_pid_handle() };
+    #[cfg(unix)]
+    let benchmark_pid = { state.lock().await.engine.benchmark_pid_handle() };
 
     #[cfg(unix)]
     {
@@ -138,6 +144,7 @@ async fn main() -> Result<()> {
         let state_for_signals = Arc::clone(&state);
         let socket_for_signals = actual_socket_path.clone();
         let engine_pid_for_signals = engine_pid.clone();
+        let benchmark_pid_for_signals = benchmark_pid.clone();
 
         tokio::spawn(async move {
             tokio::select! {
@@ -161,43 +168,16 @@ async fn main() -> Result<()> {
                     eprintln!("⚠️ State lock busy during shutdown — best-effort restore without it.");
                     #[cfg(target_os = "macos")]
                     best_effort_proxy_off();
-                    // engine.stop() never ran, so the engine child (tpws/winws)
-                    // would be reparented to launchd still holding the SOCKS
-                    // port. Kill it directly via the lock-free PID handle.
-                    let pid = engine_pid_for_signals.load(std::sync::atomic::Ordering::SeqCst);
-                    if pid != 0 {
-                        // kill(pid, 0) is a pure existence check (sends no
-                        // signal). It narrows the PID-reuse window (the child
-                        // already exited on its own and the OS recycled its PID
-                        // before this fallback ran) down to the gap between
-                        // this check and the SIGKILL below, instead of the
-                        // whole 3s+ timeout that preceded it. Not a complete
-                        // fix — only an OS process handle (pidfd / kqueue
-                        // EVFILT_PROC) closes that gap entirely — but a cheap
-                        // reduction of an already-narrow, theoretical risk, and
-                        // ProcessHandle::spawn/kill (v2.1.26) now clear this
-                        // slot promptly on every normal path, so a genuinely
-                        // stale PID here should be rare.
-                        #[cfg(target_os = "macos")]
-                        {
-                            let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-                            if still_alive {
-                                eprintln!("   killing orphaned engine child pid {pid}");
-                                unsafe {
-                                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                                }
-                            } else {
-                                eprintln!("   engine child pid {pid} already exited; nothing to kill");
-                            }
-                        }
-                        // libc is a macOS-only dependency here; keep the
-                        // subprocess form for a hypothetical non-macOS unix build.
-                        #[cfg(all(unix, not(target_os = "macos")))]
-                        {
-                            eprintln!("   killing orphaned engine child pid {pid}");
-                            let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
-                        }
-                    }
+                    // engine.stop() never ran, so the real engine child
+                    // (tpws/winws) would be reparented to launchd still holding
+                    // the SOCKS port. A concurrent test_strategy() benchmark
+                    // child (IpcRequest::TestStrategy does not stop() the real
+                    // engine first) would orphan the same way, in its own slot.
+                    // Both are independent and both may be non-zero at once.
+                    let pid_a = engine_pid_for_signals.load(std::sync::atomic::Ordering::SeqCst);
+                    let pid_b = benchmark_pid_for_signals.load(std::sync::atomic::Ordering::SeqCst);
+                    kill_orphan_if_alive(pid_a, "engine");
+                    kill_orphan_if_alive(pid_b, "benchmark");
                 }
             }
             if socket_for_signals.exists() {
@@ -529,6 +509,43 @@ fn best_effort_proxy_off() {
             .status();
     }
     sp::clear_recorded_service();
+}
+
+/// Kill `pid` if it is still alive, on the shutdown-timeout fallback path.
+/// `label` is only used in the log line ("engine" / "benchmark").
+///
+/// kill(pid, 0) is a pure existence check (sends no signal). It narrows the
+/// PID-reuse window (the child already exited on its own and the OS recycled
+/// its PID before this fallback ran) down to the gap between this check and
+/// the SIGKILL below, instead of the whole 3s+ timeout that preceded it. Not a
+/// complete fix — only an OS process handle (pidfd / kqueue EVFILT_PROC)
+/// closes that gap entirely — but a cheap reduction of an already-narrow,
+/// theoretical risk, and ProcessHandle::spawn/kill clear their slot promptly
+/// on every normal path, so a genuinely stale PID here should be rare.
+#[cfg(unix)]
+fn kill_orphan_if_alive(pid: u32, label: &str) {
+    if pid == 0 {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        if still_alive {
+            eprintln!("   killing orphaned {label} child pid {pid}");
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        } else {
+            eprintln!("   {label} child pid {pid} already exited; nothing to kill");
+        }
+    }
+    // libc is a macOS-only dependency here; keep the subprocess form for a
+    // hypothetical non-macOS unix build.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        eprintln!("   killing orphaned {label} child pid {pid}");
+        let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    }
 }
 
 #[cfg(unix)]

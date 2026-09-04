@@ -91,15 +91,28 @@ pub struct UnblockEngine {
     probe_runner: ProbeRunner,
     active_process: Option<ProcessHandle>,
     watchdog_running: Arc<AtomicBool>,
-    /// PID of whichever engine child (tpws / winws) `ProcessHandle::spawn` most
-    /// recently published here, or 0 — set on spawn and cleared on kill/Drop by
-    /// `ProcessHandle` itself (see its `pid_slot` field), not by callers. This
-    /// covers every spawn site through this engine instance, including
-    /// `test_strategy()`'s short-lived AutoTune benchmark process, not just the
-    /// long-lived one in `active_process`. Kept outside the daemon's state
-    /// Mutex so a shutdown path that cannot acquire the lock can still kill
-    /// whatever is currently running instead of orphaning it on the SOCKS port.
+    /// PID of the long-lived engine child in `active_process` (the real,
+    /// user-facing tpws/winws spawned by `start()`), or 0 — set on spawn and
+    /// cleared on kill/Drop by `ProcessHandle` itself (see its `pid_slot`
+    /// field), not by callers. Kept outside the daemon's state Mutex so a
+    /// shutdown path that cannot acquire the lock can still kill it instead of
+    /// orphaning it on the SOCKS port.
+    ///
+    /// `test_strategy()` (used standalone by `IpcRequest::TestStrategy`, not
+    /// just inside `auto_tune()`) can run *while the real engine is still
+    /// running* — that is its whole point, benchmarking a candidate strategy
+    /// without disturbing the active one. It therefore MUST NOT publish into
+    /// this same slot: doing so would overwrite the real engine's PID with the
+    /// short-lived benchmark process's, and clearing it on the benchmark's own
+    /// completion would then erase the real engine's PID even though it is
+    /// still alive. See `benchmark_engine_pid` for its own, separate slot.
     active_engine_pid: Arc<AtomicU32>,
+    /// PID of the short-lived benchmark child `test_strategy()` spawns, or 0.
+    /// Same set/clear mechanics as `active_engine_pid`, but a distinct slot so
+    /// a concurrent benchmark run never overwrites the real engine's tracked
+    /// PID (see the doc comment there). The daemon's shutdown-timeout fallback
+    /// checks and kills both slots independently.
+    benchmark_engine_pid: Arc<AtomicU32>,
 }
 
 impl UnblockEngine {
@@ -123,13 +136,20 @@ impl UnblockEngine {
             active_process: None,
             watchdog_running: Arc::new(AtomicBool::new(false)),
             active_engine_pid: Arc::new(AtomicU32::new(0)),
+            benchmark_engine_pid: Arc::new(AtomicU32::new(0)),
         }
     }
 
-    /// A handle to the live engine child's PID (0 = none), readable without the
-    /// daemon state lock. Used by the daemon's shutdown-timeout path.
+    /// A handle to the live *real* engine child's PID (0 = none), readable
+    /// without the daemon state lock. Used by the daemon's shutdown-timeout path.
     pub fn engine_pid_handle(&self) -> Arc<AtomicU32> {
         self.active_engine_pid.clone()
+    }
+
+    /// A handle to `test_strategy()`'s live benchmark child's PID (0 = none),
+    /// separate from `engine_pid_handle()` — see `benchmark_engine_pid`'s doc.
+    pub fn benchmark_pid_handle(&self) -> Arc<AtomicU32> {
+        self.benchmark_engine_pid.clone()
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -432,10 +452,13 @@ impl UnblockEngine {
             }
         }
 
-        // Published into active_engine_pid for the lifetime of this benchmark
-        // process too (not just the real engine's long-lived one), so a daemon
-        // shutdown mid-AutoTune can find and kill it — see the field doc.
-        let mut proc = ProcessHandle::spawn(&exe_path, &strategy.args, self.active_engine_pid.clone())?;
+        // Published into the SEPARATE benchmark_engine_pid slot, not
+        // active_engine_pid: this can run while the real engine is still up
+        // (IpcRequest::TestStrategy does not stop() it first), so it must never
+        // overwrite/clear the real engine's tracked PID. A daemon shutdown
+        // mid-benchmark (whether inside AutoTune or a standalone TestStrategy
+        // call) can still find and kill it via benchmark_pid_handle().
+        let mut proc = ProcessHandle::spawn(&exe_path, &strategy.args, self.benchmark_engine_pid.clone())?;
         sleep(Duration::from_millis(700)).await;
 
         if !proc.is_alive() {
