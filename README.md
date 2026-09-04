@@ -81,7 +81,7 @@ GhostLink/
 │       ├── lib.rs                # Core engine export library
 │       ├── bin/
 │       │   ├── ghostlink_cli.rs    # Cross-platform CLI benchmark & control tool
-│       │   ├── ghostlink_daemon.rs # Privileged background helper daemon (Unix socket / Windows Loopback)
+│       │   ├── ghostlink_daemon.rs # Privileged background helper daemon (Unix socket / Windows secured named pipe)
 │       │   └── ghostlink_menubar.rs# macOS native AppKit status bar application
 │       └── engine/
 │           ├── types.rs          # Platform, Strategy & Probe models

@@ -2,8 +2,10 @@
 
 use anyhow::{anyhow, Result};
 use ghostlink_engine::engine::ipc::{
-    DaemonStatusInfo, IpcEnvelope, IpcRequest, IpcResponse, WINDOWS_IPC_ADDR,
+    DaemonStatusInfo, IpcEnvelope, IpcRequest, IpcResponse,
 };
+#[cfg(windows)]
+use ghostlink_engine::engine::ipc::WINDOWS_PIPE_NAME;
 #[cfg(unix)]
 use ghostlink_engine::engine::ipc::{DEFAULT_SOCKET_PATH, FALLBACK_SOCKET_PATH};
 use ghostlink_engine::{EngineConfig, EngineState, ProbeRunner, Strategy, UnblockEngine};
@@ -24,7 +26,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 
 #[cfg(windows)]
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
 struct DaemonState {
     engine: UnblockEngine,
@@ -178,10 +180,21 @@ async fn main() -> Result<()> {
             SetConsoleCtrlHandler(Some(ctrl_handler), 1);
         }
 
-        let listener = TcpListener::bind(WINDOWS_IPC_ADDR).await
-            .map_err(|e| anyhow!("Failed to bind GhostLink Windows service to {}: {}", WINDOWS_IPC_ADDR, e))?;
+        // Named-pipe security descriptor: SYSTEM + local Administrators get full
+        // control, interactively logged-on users get read/write (the tray/CLI run
+        // in the user's session). Nothing else — no anonymous, network, or
+        // sandboxed-AppContainer access.
+        let mut pipe_sa = PipeSecurityAttributes::new()
+            .ok_or_else(|| anyhow!("Failed to build named-pipe security descriptor"))?;
 
-        println!("📡 Listening on Local IPC (Loopback): {}", WINDOWS_IPC_ADDR);
+        let mut listener: NamedPipeServer = unsafe {
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .create_with_security_attributes_raw(WINDOWS_PIPE_NAME, pipe_sa.as_mut_ptr())
+        }
+        .map_err(|e| anyhow!("Failed to create GhostLink daemon pipe {}: {}", WINDOWS_PIPE_NAME, e))?;
+
+        println!("📡 Listening on secured named pipe: {}", WINDOWS_PIPE_NAME);
 
         let state_for_signals = Arc::clone(&state);
         tokio::spawn(async move {
@@ -191,8 +204,6 @@ async fn main() -> Result<()> {
             let _ = st.engine.stop().await;
             std::process::exit(0);
         });
-
-        println!("📡 Listening on Windows TCP IPC: {} (127.0.0.1:49281)", WINDOWS_IPC_ADDR);
 
         // 1.5 Ensure Clean Hosts Mappings for Discord & WikiLeaks against ISP DNS Poisoning
         ensure_clean_hosts();
@@ -334,19 +345,35 @@ async fn main() -> Result<()> {
         });
 
         loop {
-            match listener.accept().await {
-                Ok((stream, _addr)) => {
-                    let state_clone = Arc::clone(&state);
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_tcp_connection(stream, state_clone).await {
-                            eprintln!("⚠️ Error handling client connection: {}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    eprintln!("⚠️ TCP accept error: {}", e);
-                }
+            // Wait for a client on the current instance.
+            if let Err(e) = listener.connect().await {
+                eprintln!("⚠️ Pipe connect error: {}", e);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                continue;
             }
+
+            // Immediately stand up the next instance so there is always a pipe to
+            // connect to, then hand the connected instance to a task.
+            let next = loop {
+                match unsafe {
+                    ServerOptions::new()
+                        .create_with_security_attributes_raw(WINDOWS_PIPE_NAME, pipe_sa.as_mut_ptr())
+                } {
+                    Ok(s) => break s,
+                    Err(e) => {
+                        eprintln!("⚠️ Failed to create next pipe instance, retrying: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                }
+            };
+            let connected = std::mem::replace(&mut listener, next);
+
+            let state_clone = Arc::clone(&state);
+            tokio::spawn(async move {
+                if let Err(e) = handle_pipe_connection(connected, state_clone).await {
+                    eprintln!("⚠️ Error handling client connection: {}", e);
+                }
+            });
         }
     }
 
@@ -405,11 +432,10 @@ async fn handle_unix_connection(stream: UnixStream, state: Arc<Mutex<DaemonState
 }
 
 #[cfg(windows)]
-async fn handle_tcp_connection(stream: TcpStream, state: Arc<Mutex<DaemonState>>) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
+async fn handle_pipe_connection(stream: NamedPipeServer, state: Arc<Mutex<DaemonState>>) -> Result<()> {
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
-    let expected_token = get_or_create_daemon_token();
 
     loop {
         line.clear();
@@ -439,10 +465,13 @@ async fn handle_tcp_connection(stream: TcpStream, state: Arc<Mutex<DaemonState>>
             continue;
         }
 
-        let (req_token, request) = if let Ok(envelope) = serde_json::from_str::<IpcEnvelope>(trimmed) {
-            (envelope.token, envelope.request)
+        // The named-pipe DACL (SYSTEM + Administrators + INTERACTIVE only) is the
+        // authentication boundary on Windows, so no per-request token check here.
+        // Both the envelope form and a bare IpcRequest are accepted.
+        let request = if let Ok(envelope) = serde_json::from_str::<IpcEnvelope>(trimmed) {
+            envelope.request
         } else if let Ok(req) = serde_json::from_str::<IpcRequest>(trimmed) {
-            (None, req)
+            req
         } else {
             let err_resp = IpcResponse::Error {
                 error: "Invalid JSON request".to_string(),
@@ -453,21 +482,6 @@ async fn handle_tcp_connection(stream: TcpStream, state: Arc<Mutex<DaemonState>>
             writer.flush().await?;
             continue;
         };
-
-        // Authentication verification
-        if !matches!(request, IpcRequest::Ping) {
-            if req_token.as_deref() != Some(&expected_token) {
-                eprintln!("🚨 [IPC SECURITY] Rejected unauthenticated request from loopback client!");
-                let err_resp = IpcResponse::Error {
-                    error: "Unauthorized: Invalid or missing IPC authentication token".to_string(),
-                };
-                let mut out = serde_json::to_string(&err_resp)?;
-                out.push('\n');
-                writer.write_all(out.as_bytes()).await?;
-                writer.flush().await?;
-                continue;
-            }
-        }
 
         let response = process_ipc_request(request, &state).await;
         let mut out = serde_json::to_string(&response)?;
@@ -892,37 +906,65 @@ fn is_windows_admin() -> bool {
     }
 }
 
+/// Owns a self-relative SECURITY_DESCRIPTOR (built from SDDL) plus the
+/// SECURITY_ATTRIBUTES that points at it, for use with
+/// `ServerOptions::create_with_security_attributes_raw`.
+///
+/// SDDL: SYSTEM (SY) and the local Administrators group (BA) get GENERIC_ALL;
+/// interactively logged-on users (IU) get GENERIC_READ | GENERIC_WRITE — enough
+/// for the tray/CLI in the user's session to talk to the pipe, and nothing for
+/// anonymous, network, service, or AppContainer callers.
 #[cfg(windows)]
-fn get_or_create_daemon_token() -> String {
-    use rand::RngCore;
-    let token_path = ghostlink_engine::engine::ipc::get_token_path();
-    if let Ok(existing) = std::fs::read_to_string(&token_path) {
-        let trimmed = existing.trim().to_string();
-        if !trimmed.is_empty() {
-            return trimmed;
+struct PipeSecurityAttributes {
+    sd: *mut core::ffi::c_void,
+    sa: windows_sys::Win32::Security::SECURITY_ATTRIBUTES,
+}
+
+#[cfg(windows)]
+impl PipeSecurityAttributes {
+    fn new() -> Option<Self> {
+        use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+        const SDDL_REVISION_1: u32 = 1;
+        let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || sd.is_null() {
+            return None;
+        }
+
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd,
+            bInheritHandle: 0,
+        };
+        Some(Self { sd, sa })
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut core::ffi::c_void {
+        &mut self.sa as *mut _ as *mut core::ffi::c_void
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PipeSecurityAttributes {
+    fn drop(&mut self) {
+        if !self.sd.is_null() {
+            unsafe { windows_sys::Win32::Foundation::LocalFree(self.sd); }
         }
     }
-
-    let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    let token = hex::encode(bytes);
-
-    if let Some(parent) = token_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&token_path, &token);
-
-    let _ = ghostlink_engine::silent_command("icacls.exe")
-        .args([
-            token_path.to_str().unwrap_or(""),
-            "/inheritance:r",
-            "/grant:r", "SYSTEM:(F)",
-            "/grant:r", "Administrators:(F)",
-            "/grant:r", "Users:(R)",
-        ])
-        .status();
-
-    token
 }
 
 #[cfg(windows)]

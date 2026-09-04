@@ -1,7 +1,8 @@
 # Rust build artifacts
 target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed: GhostLink ships as an application, so builds must be
+# reproducible (pinned dependency graph) for release binaries.
 
 # Operating System Files
 .DS_Store

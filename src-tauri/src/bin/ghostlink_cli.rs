@@ -538,7 +538,7 @@ async fn main() -> Result<()> {
 
                 ServiceCommands::Status => {
                     println!("\n🔍 Helper Service Installed: {}", if sm.is_service_installed() { "YES".green() } else { "NO".yellow() });
-                    println!("📡 IPC Transport: {}", if cfg!(target_os = "windows") { "127.0.0.1:49281 (TCP Loopback)".cyan() } else { sm.client().socket_path().to_string_lossy().cyan() });
+                    println!("📡 IPC Transport: {}", if cfg!(target_os = "windows") { r"\\.\pipe\ghostlink-daemon (secured named pipe)".cyan() } else { sm.client().socket_path().to_string_lossy().cyan() });
                     
                     if sm.is_daemon_running().await {
                         let (_ver, is_root, pid) = sm.client().ping().await?;

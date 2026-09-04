@@ -7,7 +7,14 @@ use crate::engine::types::{ProbeSummary, Strategy};
 
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/ghostlink.sock";
 pub const FALLBACK_SOCKET_PATH: &str = "/tmp/ghostlink.sock";
-pub const WINDOWS_IPC_ADDR: &str = "127.0.0.1:49281";
+
+/// Windows IPC transport. A named pipe whose DACL (built in the daemon) grants
+/// access only to SYSTEM, the local Administrators group, and interactively
+/// logged-on users — so an arbitrary local/sandboxed process can no longer reach
+/// the privileged daemon the way it could with the old `127.0.0.1:49281` TCP
+/// loopback socket. The pipe ACL is the authentication boundary; no shared bearer
+/// token file is written any more.
+pub const WINDOWS_PIPE_NAME: &str = r"\\.\pipe\ghostlink-daemon";
 
 /// Returns the primary active socket path or fallback.
 pub fn get_socket_path() -> PathBuf {
@@ -22,17 +29,12 @@ pub fn get_socket_path() -> PathBuf {
     var_run.to_path_buf()
 }
 
-/// Returns the path to the daemon authentication secret token.
+/// Returns the path to the daemon authentication secret token (Unix only).
+/// On Windows the named-pipe DACL is the authentication boundary and no token
+/// file is used.
+#[cfg(not(target_os = "windows"))]
 pub fn get_token_path() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let pdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
-        PathBuf::from(pdata).join("GhostLink").join(".daemon_token")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        PathBuf::from("/var/run/ghostlink.token")
-    }
+    PathBuf::from("/var/run/ghostlink.token")
 }
 
 /// Wrapper envelope to authenticate IPC requests.
@@ -155,10 +157,13 @@ impl Default for DaemonClient {
 
 impl DaemonClient {
     pub fn new(socket_path: PathBuf) -> Self {
+        #[cfg(not(target_os = "windows"))]
         let token = std::fs::read_to_string(get_token_path())
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        #[cfg(target_os = "windows")]
+        let token: Option<String> = None; // pipe DACL is the auth boundary on Windows
         Self { socket_path, token }
     }
 
@@ -196,21 +201,38 @@ impl DaemonClient {
 
         #[cfg(windows)]
         let (reader, mut writer) = {
-            let stream = tokio::net::TcpStream::connect(WINDOWS_IPC_ADDR)
-                .await
-                .with_context(|| format!("Failed to connect to GhostLink Windows service on {}", WINDOWS_IPC_ADDR))?;
-            stream.into_split()
+            use tokio::net::windows::named_pipe::ClientOptions;
+            // ERROR_PIPE_BUSY (231): all pipe instances are momentarily in use; back off briefly.
+            const ERROR_PIPE_BUSY: i32 = 231;
+            let mut attempt = 0u32;
+            let client = loop {
+                match ClientOptions::new().open(WINDOWS_PIPE_NAME) {
+                    Ok(c) => break c,
+                    Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempt < 25 => {
+                        attempt += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                    }
+                    Err(e) => {
+                        return Err(anyhow!("Failed to connect to GhostLink daemon pipe {}: {}", WINDOWS_PIPE_NAME, e));
+                    }
+                }
+            };
+            tokio::io::split(client)
         };
 
         let mut reader = BufReader::new(reader);
 
-        // Always wrap request in authenticated envelope
+        // On Unix the daemon still verifies a shared token; on Windows `token` is
+        // always None and the pipe DACL is the boundary.
+        #[cfg(not(target_os = "windows"))]
         let token_val = self.token.clone().or_else(|| {
             std::fs::read_to_string(get_token_path())
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         });
+        #[cfg(target_os = "windows")]
+        let token_val = self.token.clone();
 
         let envelope = IpcEnvelope {
             token: token_val,

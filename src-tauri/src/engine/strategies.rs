@@ -14,12 +14,26 @@ impl StrategyManager {
         }
     }
 
+    /// Bump whenever the bundled domain lists below change so existing installs
+    /// actually pick up the new content instead of keeping a stale first-run copy.
+    pub const LISTS_VERSION: u32 = 3;
+
     pub fn ensure_lists(&self) -> Result<()> {
         fs::create_dir_all(&self.lists_dir)?;
 
+        // Force a refresh of the managed lists when the bundled version is newer
+        // than what's on disk (or the marker is missing). Below that threshold we
+        // keep the "write only if absent" behaviour so nothing is churned needlessly.
+        let version_path = self.lists_dir.join(".version");
+        let on_disk_version: u32 = fs::read_to_string(&version_path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        let force = on_disk_version < Self::LISTS_VERSION;
+
         let write_list = |filename: &str, content: &str| -> Result<()> {
             let path = self.lists_dir.join(filename);
-            if !path.exists() {
+            if force || !path.exists() {
                 fs::write(&path, content)?;
             }
             Ok(())
@@ -68,6 +82,10 @@ impl StrategyManager {
             "ipset-exclude.txt",
             "10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16\n127.0.0.0/8\n",
         )?;
+
+        if force {
+            let _ = fs::write(&version_path, Self::LISTS_VERSION.to_string());
+        }
 
         Ok(())
     }
