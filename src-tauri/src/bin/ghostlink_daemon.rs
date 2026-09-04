@@ -996,7 +996,15 @@ fn ensure_clean_hosts() {
         "162.159.138.232 gateway.discord.gg",
     ];
 
-    let content = std::fs::read_to_string(hosts_path).unwrap_or_default();
+    // If we cannot read the current hosts file, do NOT write one — that would
+    // wipe the user's existing entries. Fall back to DoH + DPI desync only.
+    let content = match std::fs::read_to_string(hosts_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("⚠️ [DNS] Cannot read hosts file ({e}); skipping managed block, relying on DoH + DPI desync.");
+            return;
+        }
+    };
 
     // Split out any previous GhostLink block, keeping everything else verbatim.
     let mut kept: Vec<&str> = Vec::new();
