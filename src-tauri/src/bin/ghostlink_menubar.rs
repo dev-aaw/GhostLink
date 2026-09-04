@@ -69,18 +69,13 @@ mod macos_app {
             });
 
             // 2. Query WireGuard Tunnels Status (Mutual Exclusion).
-            // One `scutil --nc list` covers both tunnels instead of two
-            // `scutil --nc status` forks on the AppKit main thread per open.
-            let wg_tunnels = WireGuardManager::list_tunnels();
-            let wg_state = |name: &str| {
-                wg_tunnels
-                    .iter()
-                    .find(|t| t.name == name)
-                    .map(|t| t.state.clone())
-                    .unwrap_or(WireGuardState::Disconnected)
-            };
-            let is_daily_connected = wg_state("wg0-daily") == WireGuardState::Connected;
-            let is_full_connected = wg_state("wg0-mac") == WireGuardState::Connected;
+            // `status(name)` asks scutil by name and is independent of how
+            // `scutil --nc list` labels the tunnel type; list-parsing (tried
+            // briefly in v2.1.17) silently dropped .mobileconfig-provisioned or
+            // "[VPN]"-typed tunnels and showed them as Disconnected while up.
+            // This runs only on menuWillOpen:, so two short forks are fine.
+            let is_daily_connected = WireGuardManager::status("wg0-daily") == WireGuardState::Connected;
+            let is_full_connected = WireGuardManager::status("wg0-mac") == WireGuardState::Connected;
 
             // 3. Query Learned Fallback Routes
             let route_count = SmartRouter::load_routes().len();
