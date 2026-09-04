@@ -16,17 +16,27 @@ pub const FALLBACK_SOCKET_PATH: &str = "/tmp/ghostlink.sock";
 /// token file is written any more.
 pub const WINDOWS_PIPE_NAME: &str = r"\\.\pipe\ghostlink-daemon";
 
-/// True if `path` is a real socket owned by root or by the current effective
-/// user.
+/// A path that no daemon ever binds. Returned when every real candidate was
+/// rejected as untrusted, so the client provably fails to connect and drops to
+/// standalone mode instead of dialing a possibly hostile listener.
+#[cfg(target_os = "macos")]
+const UNTRUSTED_SENTINEL: &str = "/var/run/ghostlink.sock.untrusted-rejected";
+
+/// True if `path` is safe for *this* client to connect to and trust.
 ///
 /// Security: `/tmp` is world-writable + sticky on macOS. When the daemon runs as
-/// root it binds `/var/run/ghostlink.sock` and leaves `/tmp/ghostlink.sock` free,
-/// so any local user can plant a rogue listener there. The daemon's own
+/// root it binds `/var/run/ghostlink.sock` and leaves `/tmp/ghostlink.sock`
+/// free, so any local user can plant a rogue listener there. The daemon's own
 /// `getpeereid` check protects the *daemon*, but nothing stopped the CLI / menu
 /// bar from connecting to that rogue socket, trusting its `Pong`/`Status`
-/// (spoofed "protected" state) and sending it `Start`/`Stop`/`AutoTune`. Verify
-/// ownership before trusting a candidate path; `/var/run` is root-only so a
-/// socket there is inherently fine, but we check uniformly.
+/// (spoofed "protected" state) and sending it `Start`/`Stop`/`AutoTune`.
+///
+/// A non-root client trusts a candidate only if it is a real socket owned by
+/// root or by that client's own euid. A root client (`sudo ghostlink_cli`)
+/// trusts any real socket: a rogue owner cannot make root do anything root
+/// could not already do, and this lets an admin reach a daemon they started
+/// unprivileged. Both cases still require the node to actually be a socket, so a
+/// planted regular file / FIFO is rejected.
 #[cfg(target_os = "macos")]
 fn is_trusted_socket(path: &Path) -> bool {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -34,6 +44,9 @@ fn is_trusted_socket(path: &Path) -> bool {
         Ok(meta) => {
             if !meta.file_type().is_socket() {
                 return false;
+            }
+            if unsafe { libc::geteuid() } == 0 {
+                return true;
             }
             let owner = meta.uid();
             owner == 0 || owner == unsafe { libc::geteuid() }
@@ -47,25 +60,41 @@ fn is_trusted_socket(_path: &Path) -> bool {
     true
 }
 
-/// Returns the primary active socket path or fallback.
-///
-/// A candidate path is only used when `is_trusted_socket` accepts it; an
-/// untrusted file at a candidate path is ignored (the caller then falls back to
-/// standalone mode instead of talking to a possibly hostile listener).
+/// Returns the daemon socket path to connect to, or a path that cannot connect
+/// (so the caller falls back to standalone mode) when every real candidate was
+/// rejected as untrusted.
 pub fn get_socket_path() -> PathBuf {
     let var_run = Path::new(DEFAULT_SOCKET_PATH);
-    if var_run.exists() {
-        if is_trusted_socket(var_run) {
-            return var_run.to_path_buf();
-        }
-        eprintln!("⚠️ SECURITY: Ignoring untrusted daemon socket at {DEFAULT_SOCKET_PATH} (unexpected owner or type)");
-    }
     let tmp = Path::new(FALLBACK_SOCKET_PATH);
-    if tmp.exists() {
-        if is_trusted_socket(tmp) {
-            return tmp.to_path_buf();
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut rejected = false;
+        if var_run.exists() {
+            if is_trusted_socket(var_run) {
+                return var_run.to_path_buf();
+            }
+            eprintln!("⚠️ SECURITY: Ignoring untrusted daemon socket at {DEFAULT_SOCKET_PATH} (unexpected owner or type)");
+            rejected = true;
         }
-        eprintln!("⚠️ SECURITY: Ignoring untrusted daemon socket at {FALLBACK_SOCKET_PATH} (not a socket owned by root or the current user)");
+        if tmp.exists() {
+            if is_trusted_socket(tmp) {
+                return tmp.to_path_buf();
+            }
+            eprintln!("⚠️ SECURITY: Ignoring untrusted daemon socket at {FALLBACK_SOCKET_PATH} (not a socket owned by root or the current user)");
+            rejected = true;
+        }
+        if rejected {
+            // Do not hand back a path we just rejected; force standalone mode.
+            return PathBuf::from(UNTRUSTED_SENTINEL);
+        }
+    }
+
+    if var_run.exists() {
+        return var_run.to_path_buf();
+    }
+    if tmp.exists() {
+        return tmp.to_path_buf();
     }
     var_run.to_path_buf()
 }
