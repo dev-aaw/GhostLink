@@ -119,10 +119,29 @@ impl Default for EngineConfig {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let home = std::env::var("HOME")
-                .or_else(|_| std::env::var("USERPROFILE"))
-                .unwrap_or_else(|_| ".".to_string());
-            let base_dir = PathBuf::from(home).join(".ghostlink");
+            // The privileged root daemon launches under launchd, which gives a
+            // system LaunchDaemon no HOME at all: std::env::var("HOME") errors,
+            // and the old ".".to_string() fallback resolved to a RELATIVE path
+            // under whatever the daemon's cwd happened to be, which
+            // create_dir_all then failed to create ("Failed to create bin
+            // directory: \"./.ghostlink/bin/darwin\""). A properly installed
+            // LaunchDaemon could never actually start the engine at all. Same
+            // class of bug already fixed for system_proxy.rs's service pin
+            // (v2.1.19): a root process gets a fixed system path instead of
+            // deriving one from an environment variable it doesn't have.
+            #[cfg(target_os = "macos")]
+            let is_root = unsafe { libc::geteuid() == 0 };
+            #[cfg(not(target_os = "macos"))]
+            let is_root = false;
+
+            let base_dir = if is_root {
+                PathBuf::from("/Library/Application Support/GhostLink/data")
+            } else {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(home).join(".ghostlink")
+            };
             Self {
                 base_dir,
                 socks_port: 10808,
