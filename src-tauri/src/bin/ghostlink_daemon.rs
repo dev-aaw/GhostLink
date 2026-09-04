@@ -522,29 +522,25 @@ fn best_effort_proxy_off() {
 /// closes that gap entirely — but a cheap reduction of an already-narrow,
 /// theoretical risk, and ProcessHandle::spawn/kill clear their slot promptly
 /// on every normal path, so a genuinely stale PID here should be rare.
-#[cfg(unix)]
+///
+/// macOS-only (not `#[cfg(unix)]`): `libc` is a macOS-only Cargo dependency
+/// (see Cargo.toml) and this crate is only ever shipped for macOS and Windows,
+/// so a `kill -9` subprocess fallback "for a hypothetical non-macOS unix
+/// build" was dead code that could never actually compile for any supported
+/// or even hypothetical target of this project.
+#[cfg(target_os = "macos")]
 fn kill_orphan_if_alive(pid: u32, label: &str) {
     if pid == 0 {
         return;
     }
-    #[cfg(target_os = "macos")]
-    {
-        let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-        if still_alive {
-            eprintln!("   killing orphaned {label} child pid {pid}");
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
-        } else {
-            eprintln!("   {label} child pid {pid} already exited; nothing to kill");
-        }
-    }
-    // libc is a macOS-only dependency here; keep the subprocess form for a
-    // hypothetical non-macOS unix build.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
+    let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+    if still_alive {
         eprintln!("   killing orphaned {label} child pid {pid}");
-        let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    } else {
+        eprintln!("   {label} child pid {pid} already exited; nothing to kill");
     }
 }
 
