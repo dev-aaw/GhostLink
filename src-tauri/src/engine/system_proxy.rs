@@ -5,40 +5,48 @@ use anyhow::Context;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
-/// Records the exact `networksetup` service name the SOCKS proxy was last
-/// enabled on. The primary network service can change while GhostLink runs
-/// (Wi-Fi <-> Ethernet), and the teardown may run from a *different* process
-/// (`ghostlink_cli stop`, the watchdog). Re-detecting the primary service at
-/// disable time then turns the proxy off on the wrong service and silently
-/// leaves it enabled on the original one — no internet, no error.
+/// Fixed system path that records the exact `networksetup` service name the SOCKS
+/// proxy was last enabled on. The primary network service can change while
+/// GhostLink runs (Wi-Fi <-> Ethernet) and the teardown may run from a
+/// *different* process (`ghostlink_cli stop`, the watchdog, the daemon after a
+/// restart); re-detecting the primary service at disable time then turns the
+/// proxy off on the wrong service and silently leaves it enabled on the
+/// original one — no internet, no error.
+///
+/// This must NOT be derived from `$HOME`: the production helper runs as a
+/// launchd LaunchDaemon, which gets no `HOME`, and even where `HOME` is set the
+/// root daemon (`enable`) and the console-user CLI (`stop`) would resolve to
+/// different files. `/Library/Application Support/GhostLink` is created by
+/// `service install` as root:wheel; the daemon (root) writes the record 0644 so
+/// any process can read it. In standalone (non-root, no daemon) mode the write
+/// is a harmless no-op and `SystemProxyManager::active_service` in memory covers
+/// the single-process enable/disable pair.
 #[cfg(target_os = "macos")]
-fn recorded_service_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".ghostlink").join("active_service"))
-}
+const ACTIVE_SERVICE_FILE: &str = "/Library/Application Support/GhostLink/active_service";
 
 #[cfg(target_os = "macos")]
 pub fn record_active_service(service: &str) {
-    if let Some(path) = recorded_service_path() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&path, service.as_bytes());
+    let path = std::path::Path::new(ACTIVE_SERVICE_FILE);
+    if let Some(parent) = path.parent() {
+        // Succeeds for root (production daemon); a harmless no-op otherwise.
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(path, service.as_bytes()).is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
     }
 }
 
 #[cfg(target_os = "macos")]
 pub fn recorded_active_service() -> Option<String> {
-    let raw = std::fs::read_to_string(recorded_service_path()?).ok()?;
+    let raw = std::fs::read_to_string(ACTIVE_SERVICE_FILE).ok()?;
     let name = raw.trim();
     if name.is_empty() { None } else { Some(name.to_string()) }
 }
 
 #[cfg(target_os = "macos")]
 pub fn clear_recorded_service() {
-    if let Some(path) = recorded_service_path() {
-        let _ = std::fs::remove_file(path);
-    }
+    let _ = std::fs::remove_file(ACTIVE_SERVICE_FILE);
 }
 
 pub struct SystemProxyManager {
