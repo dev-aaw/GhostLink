@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "ghostlink"
-version = "2.1.38"
+version = "2.1.39"
 dependencies = [
  "anyhow",
  "clap",
