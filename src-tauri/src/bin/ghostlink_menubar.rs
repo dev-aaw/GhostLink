@@ -50,6 +50,59 @@ mod macos_app {
         f(ctx)
     }
 
+    /// Extract a human-readable message from a caught panic payload (the
+    /// standard `panic!("...")` / `.expect("...")` shapes; anything else is
+    /// reported generically rather than guessed at).
+    fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        }
+    }
+
+    /// Run `f`, catching any panic so it can never reach the Objective-C
+    /// runtime across the calling `extern "C" fn`'s FFI boundary.
+    ///
+    /// Without this, a panic inside one of these menu-handler callbacks
+    /// unwinds straight into "panic in a function that cannot unwind" — Rust
+    /// detects the unwind is about to cross into `extern "C"` code (which by
+    /// default cannot safely propagate it, since Objective-C's own frames in
+    /// between don't know how to run Rust's landing pads) and calls `abort()`
+    /// to avoid undefined behaviour. This happens regardless of the crate's
+    /// `[profile] panic` setting (release's `panic = "abort"` is irrelevant;
+    /// dev's default `unwind` still hits this same FFI-boundary rule) — the
+    /// whole menu bar process is gone instantly, with the LaunchAgent's
+    /// `KeepAlive` set to `false` (autostart.rs), so nothing restarts it. Every
+    /// subsequent click on the (now-vanished) status item does nothing.
+    /// `with_app_ctx`'s poison-recovery (`into_inner()`) can only matter for a
+    /// *second* call that happens after the first panicked, which requires the
+    /// process to still be alive to receive it — this is that missing half.
+    ///
+    /// `label` identifies the handler in the log so a crash report/log tail
+    /// says which one. Catching here also gives the handler a normal, no-op
+    /// return instead of no return at all.
+    ///
+    /// AssertUnwindSafe: every caller's closure only ever touches (a)
+    /// `APP_CTX`, whose `Mutex` already tolerates and recovers from poisoning
+    /// in `with_app_ctx` above — a panic mid-mutation of `AppContext`'s fields
+    /// just means the next call sees whatever partial state was left, not a
+    /// corrupted invariant that needs unwind-safety to protect; and (b) raw
+    /// Objective-C `id` pointers to Cocoa objects whose lifetime and retain/
+    /// release invariants are owned by the Objective-C runtime, not Rust's
+    /// borrow checker — a panic between two `msg_send!` calls leaves at worst
+    /// a stale/half-updated menu item, corrected by the next successful
+    /// `update_menu_ui()`, never a memory-safety issue.
+    fn catch_handler_panic(label: &str, f: impl FnOnce() + std::panic::UnwindSafe) {
+        if let Err(payload) = std::panic::catch_unwind(f) {
+            let msg = panic_message(payload.as_ref());
+            eprintln!("⚠️ [{label}] panic caught at FFI boundary: {msg}");
+            ghostlink_engine::log_msg("ERROR", &format!("panic in menu handler '{label}': {msg}"));
+        }
+    }
+
     /// Query real-time status of GhostLink, WireGuard (daily & full), Smart Fallback, and AutoStart.
     fn update_menu_ui() {
         with_app_ctx(|ctx| {
@@ -142,10 +195,13 @@ mod macos_app {
 
     // Objective-C Callback Implementations
     extern "C" fn menu_will_open(_this: &Object, _cmd: Sel, _menu: id) {
-        update_menu_ui();
+        catch_handler_panic("menu_will_open", std::panic::AssertUnwindSafe(|| {
+            update_menu_ui();
+        }));
     }
 
     extern "C" fn toggle_ghostlink(_this: &Object, _cmd: Sel, _item: id) {
+        catch_handler_panic("toggle_ghostlink", std::panic::AssertUnwindSafe(|| {
         with_app_ctx(|ctx| {
             let (is_daemon, is_running) = ctx.runtime.block_on(async {
                 if ctx.client.is_daemon_alive().await {
@@ -185,28 +241,39 @@ mod macos_app {
 
             update_menu_ui();
         });
+        }));
     }
 
     extern "C" fn toggle_wg_daily(_this: &Object, _cmd: Sel, _item: id) {
-        let _ = WireGuardManager::toggle_exclusive("wg0-daily");
-        update_menu_ui();
+        catch_handler_panic("toggle_wg_daily", std::panic::AssertUnwindSafe(|| {
+            let _ = WireGuardManager::toggle_exclusive("wg0-daily");
+            update_menu_ui();
+        }));
     }
 
     extern "C" fn toggle_wg_mac(_this: &Object, _cmd: Sel, _item: id) {
-        let _ = WireGuardManager::toggle_exclusive("wg0-mac");
-        update_menu_ui();
+        catch_handler_panic("toggle_wg_mac", std::panic::AssertUnwindSafe(|| {
+            let _ = WireGuardManager::toggle_exclusive("wg0-mac");
+            update_menu_ui();
+        }));
     }
 
     extern "C" fn select_strategy_midsld(_this: &Object, _cmd: Sel, _item: id) {
-        switch_strategy("mac-split-midsld");
+        catch_handler_panic("select_strategy_midsld", std::panic::AssertUnwindSafe(|| {
+            switch_strategy("mac-split-midsld");
+        }));
     }
 
     extern "C" fn select_strategy_tls_sni(_this: &Object, _cmd: Sel, _item: id) {
-        switch_strategy("mac-split-tls-sni");
+        catch_handler_panic("select_strategy_tls_sni", std::panic::AssertUnwindSafe(|| {
+            switch_strategy("mac-split-tls-sni");
+        }));
     }
 
     extern "C" fn select_strategy_pos1(_this: &Object, _cmd: Sel, _item: id) {
-        switch_strategy("mac-split-pos-1");
+        catch_handler_panic("select_strategy_pos1", std::panic::AssertUnwindSafe(|| {
+            switch_strategy("mac-split-pos-1");
+        }));
     }
 
     fn switch_strategy(strategy_id: &str) {
@@ -239,7 +306,13 @@ mod macos_app {
     }
 
     extern "C" fn run_autotune(_this: &Object, _cmd: Sel, _item: id) {
+        catch_handler_panic("run_autotune", std::panic::AssertUnwindSafe(|| {
         notify("GhostLink Auto-Tune", "Starting ISP strategy benchmark in background...");
+        // The spawned thread below never crosses back into Objective-C: it's a
+        // plain Rust std::thread, not an ObjC callback, so a panic inside it
+        // cannot trigger the FFI-boundary abort this fix is about — it would
+        // just end that one background thread. Left unwrapped; out of this
+        // fix's scope, noted separately as a lower-severity residual.
         std::thread::spawn(|| {
             with_app_ctx(|ctx| {
                 let res = ctx.runtime.block_on(async {
@@ -265,9 +338,13 @@ mod macos_app {
                 }
             });
         });
+        }));
     }
 
     extern "C" fn run_probe(_this: &Object, _cmd: Sel, _item: id) {
+        catch_handler_panic("run_probe", std::panic::AssertUnwindSafe(|| {
+        // Same note as run_autotune: the spawned thread doesn't cross the FFI
+        // boundary, so it's intentionally left unwrapped here.
         std::thread::spawn(|| {
             with_app_ctx(|ctx| {
                 let summary = ctx.runtime.block_on(async {
@@ -294,23 +371,32 @@ mod macos_app {
                 }
             });
         });
+        }));
     }
 
     extern "C" fn toggle_autostart(_this: &Object, _cmd: Sel, _item: id) {
-        let exe = std::env::current_exe().unwrap_or_default();
-        let _ = AutoStartManager::toggle(&exe);
-        update_menu_ui();
+        catch_handler_panic("toggle_autostart", std::panic::AssertUnwindSafe(|| {
+            let exe = std::env::current_exe().unwrap_or_default();
+            let _ = AutoStartManager::toggle(&exe);
+            update_menu_ui();
+        }));
     }
 
     extern "C" fn quit_app(_this: &Object, _cmd: Sel, _item: id) {
-        with_app_ctx(|ctx| {
-            let is_daemon = ctx.runtime.block_on(ctx.client.is_daemon_alive());
-            if is_daemon {
-                let _ = ctx.runtime.block_on(ctx.client.stop());
-            } else if let Some(ref mut eng) = ctx.standalone_engine {
-                let _ = ctx.runtime.block_on(eng.stop());
-            }
-        });
+        // Catch first so a panic during the graceful stop attempt still lets
+        // us fall through to exit(0) below — the user asked to quit; a hiccup
+        // stopping the engine shouldn't prevent that (see the comment on
+        // catch_handler_panic for why this can't just be left to abort()).
+        catch_handler_panic("quit_app", std::panic::AssertUnwindSafe(|| {
+            with_app_ctx(|ctx| {
+                let is_daemon = ctx.runtime.block_on(ctx.client.is_daemon_alive());
+                if is_daemon {
+                    let _ = ctx.runtime.block_on(ctx.client.stop());
+                } else if let Some(ref mut eng) = ctx.standalone_engine {
+                    let _ = ctx.runtime.block_on(eng.stop());
+                }
+            });
+        }));
         std::process::exit(0);
     }
 
@@ -342,6 +428,12 @@ mod macos_app {
     }
 
     pub fn run() -> anyhow::Result<()> {
+        // So catch_handler_panic's log_msg() calls below actually persist
+        // somewhere (~/.ghostlink/logs/menubar.log) instead of silently
+        // no-op'ing; the menu bar always runs as the console user, so HOME is
+        // set here (unlike the root daemon — see the base_dir fix history).
+        ghostlink_engine::init_logger("menubar");
+
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;

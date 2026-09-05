@@ -1,6 +1,6 @@
 [package]
 name = "ghostlink"
-version = "2.1.35"
+version = "2.1.37"
 edition = "2021"
 description = "GhostLink - High-performance DPI bypass & censorship resilience engine for macOS & Windows"
 authors = ["GhostLink Team"]
@@ -68,5 +68,14 @@ windows-sys = { version = "0.59", features = [
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# NOT "abort": std::panic::catch_unwind cannot catch anything under
+# panic=abort (a panic aborts the process before unwinding ever starts), so
+# the menu bar's catch_handler_panic() (ghostlink_menubar.rs) — which exists
+# specifically to stop a panic in an extern "C" callback from crossing the
+# FFI boundary into an unavoidable "panic in a function that cannot unwind"
+# abort — was a no-op in release builds. Removing this restores Rust's
+# default unwind strategy for every binary in this crate (daemon/cli/menubar
+# on macOS, daemon/cli/tray on Windows): a panic anywhere unwinds and runs
+# Drop cleanup instead of aborting immediately. Binary size grows slightly
+# (unwind tables); this has not been verified on Windows.
 strip = true
