@@ -109,126 +109,131 @@ impl StrategyManager {
     }
 
     #[cfg(target_os = "macos")]
-    fn get_macos_strategies(&self, bin_dir: &Path, socks_port: u16) -> Vec<Strategy> {
-        let q = |f: &str| bin_dir.join(f).to_string_lossy().to_string();
+    fn get_macos_strategies(&self, _bin_dir: &Path, socks_port: u16) -> Vec<Strategy> {
         let l = |f: &str| self.lists_dir.join(f).to_string_lossy().to_string();
 
-        let tls_g = q("tls_clienthello_www_google_com.bin");
-        let tls_4 = q("tls_clienthello_4pda_to.bin");
-        let tls_m = q("tls_clienthello_max_ru.bin");
-
-        let base_socks = format!("--socks=127.0.0.1:{}", socks_port);
+        // tpws (this binary's real CLI grammar — see `tpws --help`) is a
+        // userspace SOCKS/transparent proxy, NOT nfqws/winws (the netfilter/
+        // WinDivert packet-level DPI-desync tools). It has no `--dpi-desync`
+        // method selector and no packet-level "fooling"/sequence-overlap
+        // concept at all — those are unique to operating on raw, not-yet-
+        // established packets, which a listening proxy never sees. Phase A
+        // mechanical fixes only (no strategy redesign):
+        //   - `--socks` takes no value; the bind address/port are separate
+        //     flags. `--bind-addr=127.0.0.1` and `--maxconn=512` existed in
+        //     this codebase's original macOS strategies and were dropped when
+        //     these were rewritten to (incorrectly) mirror nfqws syntax.
+        //   - `--port=443` here meant "match traffic on port 443", which is
+        //     `--filter-tcp=443` (tpws's MULTI-STRATEGY section) — tpws's own
+        //     `--port` is the port *tpws itself* listens on ("only one port
+        //     number for all binds is supported" per --help), so reusing it
+        //     as a per-rule traffic filter also silently overrode the real
+        //     SOCKS listen port.
+        //   - `--split-seqovl(-pattern)=` and `--fooling=` do not exist in
+        //     tpws at all (confirmed against a full `--help` dump); every
+        //     strategy that referenced them failed to parse, printed usage,
+        //     and exited without ever attempting to bind. Removed here with
+        //     no replacement — redesigning what these strategies should
+        //     actually do instead (using tpws's real tamper primitives:
+        //     --disorder, --oob, --tlsrec, --hostcase family,
+        //     --tamper-start/--tamper-cutoff) is a separate, deliberate
+        //     follow-up, not a mechanical fix.
+        // Net effect: mac-alt9/mac-alt11/mac-general only differed in the
+        // (now-removed) seqovl/fooling values, so they collapse to identical
+        // argv below — noted for follow-up, not resolved in this phase.
+        let socks_args = |port: u16| -> Vec<String> {
+            vec![
+                "--socks".to_string(),
+                "--bind-addr=127.0.0.1".to_string(),
+                format!("--port={}", port),
+                "--maxconn=512".to_string(),
+            ]
+        };
 
         vec![
             Strategy {
                 id: "mac-alt9".to_string(),
                 name: "macOS ALT9 (Recommended)".to_string(),
-                description: "Dual-tier TLS multi-split (Google/Discord 681B + General 664B) with TS fooling. Highest success rate for Turkish ISPs.".to_string(),
+                description: "Dual-tier TCP split at position 1 (Google/Discord + General, port 443).".to_string(),
                 platform: Platform::MacOS,
-                args: vec![
-                    base_socks.clone(),
-                    "--port=443".to_string(),
+                args: [socks_args(socks_port), vec![
+                    "--filter-tcp=443".to_string(),
                     format!("--hostlist={}", l("list-google.txt")),
                     "--split-pos=1".to_string(),
-                    "--split-seqovl=681".to_string(),
-                    format!("--split-seqovl-pattern={}", tls_g),
-                    "--fooling=ts".to_string(),
                     "--new".to_string(),
-                    "--port=443".to_string(),
+                    "--filter-tcp=443".to_string(),
                     format!("--hostlist={}", l("list-general.txt")),
                     format!("--hostlist-exclude={}", l("list-exclude.txt")),
                     "--split-pos=1".to_string(),
-                    "--split-seqovl=664".to_string(),
-                    format!("--split-seqovl-pattern={}", tls_m),
-                    "--fooling=ts".to_string(),
-                ],
+                ]].concat(),
             },
             Strategy {
                 id: "mac-alt11".to_string(),
                 name: "macOS ALT11".to_string(),
-                description: "Multi-split TLS desync with TS fooling and 4pda pattern. Excellent fallback for YouTube and streaming.".to_string(),
+                description: "Dual-tier TCP split at position 1 (Google/Discord + General, port 443).".to_string(),
                 platform: Platform::MacOS,
-                args: vec![
-                    base_socks.clone(),
-                    "--port=443".to_string(),
+                args: [socks_args(socks_port), vec![
+                    "--filter-tcp=443".to_string(),
                     format!("--hostlist={}", l("list-google.txt")),
                     "--split-pos=1".to_string(),
-                    "--split-seqovl=681".to_string(),
-                    format!("--split-seqovl-pattern={}", tls_g),
-                    "--fooling=ts".to_string(),
                     "--new".to_string(),
-                    "--port=443".to_string(),
+                    "--filter-tcp=443".to_string(),
                     format!("--hostlist={}", l("list-general.txt")),
                     format!("--hostlist-exclude={}", l("list-exclude.txt")),
                     "--split-pos=1".to_string(),
-                    "--split-seqovl=568".to_string(),
-                    format!("--split-seqovl-pattern={}", tls_4),
-                    "--fooling=ts".to_string(),
-                ],
+                ]].concat(),
             },
             Strategy {
                 id: "mac-general".to_string(),
                 name: "macOS General".to_string(),
-                description: "Standard multi-split TLS desync with 4pda pattern without TS fooling. Broad compatibility.".to_string(),
+                description: "Dual-tier TCP split at position 1 (Google/Discord + General, port 443).".to_string(),
                 platform: Platform::MacOS,
-                args: vec![
-                    base_socks.clone(),
-                    "--port=443".to_string(),
+                args: [socks_args(socks_port), vec![
+                    "--filter-tcp=443".to_string(),
                     format!("--hostlist={}", l("list-google.txt")),
                     "--split-pos=1".to_string(),
-                    "--split-seqovl=681".to_string(),
-                    format!("--split-seqovl-pattern={}", tls_g),
                     "--new".to_string(),
-                    "--port=443".to_string(),
+                    "--filter-tcp=443".to_string(),
                     format!("--hostlist={}", l("list-general.txt")),
                     format!("--hostlist-exclude={}", l("list-exclude.txt")),
                     "--split-pos=1".to_string(),
-                    "--split-seqovl=568".to_string(),
-                    format!("--split-seqovl-pattern={}", tls_4),
-                ],
+                ]].concat(),
             },
             Strategy {
                 id: "mac-alt3".to_string(),
                 name: "macOS ALT3 (SNI-Split)".to_string(),
-                description: "SNI-based desynchronization splitting at SNI extension boundary with badsum fooling.".to_string(),
+                description: "Splits at the TLS SNI extension boundary (port 443).".to_string(),
                 platform: Platform::MacOS,
-                args: vec![
-                    base_socks.clone(),
-                    "--port=443".to_string(),
+                args: [socks_args(socks_port), vec![
+                    "--filter-tcp=443".to_string(),
                     format!("--hostlist={}", l("list-general.txt")),
                     format!("--hostlist-exclude={}", l("list-exclude.txt")),
                     "--split-pos=sniext+1".to_string(),
-                    "--split-seqovl=681".to_string(),
-                    format!("--split-seqovl-pattern={}", tls_g),
-                    "--fooling=badsum".to_string(),
-                ],
+                ]].concat(),
             },
             Strategy {
                 id: "mac-alt10".to_string(),
                 name: "macOS ALT10 (SLD-Split)".to_string(),
-                description: "Pure multi-split desync at second-level domain boundary. Clean bypass with zero fake packets.".to_string(),
+                description: "Splits at the second-level domain boundary (port 443).".to_string(),
                 platform: Platform::MacOS,
-                args: vec![
-                    base_socks.clone(),
-                    "--port=443".to_string(),
+                args: [socks_args(socks_port), vec![
+                    "--filter-tcp=443".to_string(),
                     format!("--hostlist={}", l("list-general.txt")),
                     format!("--hostlist-exclude={}", l("list-exclude.txt")),
                     "--split-pos=midsld".to_string(),
-                ],
+                ]].concat(),
             },
             Strategy {
                 id: "mac-simple-fake".to_string(),
                 name: "macOS Simple Fake".to_string(),
-                description: "Fast, low-overhead fake packet injection with TCP timestamp fooling.".to_string(),
+                description: "Plain TCP split at position 1 (port 443).".to_string(),
                 platform: Platform::MacOS,
-                args: vec![
-                    base_socks,
-                    "--port=443".to_string(),
+                args: [socks_args(socks_port), vec![
+                    "--filter-tcp=443".to_string(),
                     format!("--hostlist={}", l("list-general.txt")),
                     format!("--hostlist-exclude={}", l("list-exclude.txt")),
                     "--split-pos=1".to_string(),
-                    "--fooling=ts".to_string(),
-                ],
+                ]].concat(),
             },
         ]
     }
