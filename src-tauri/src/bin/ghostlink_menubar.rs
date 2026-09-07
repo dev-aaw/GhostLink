@@ -633,6 +633,17 @@ mod macos_app {
             let status_bar = NSStatusBar::systemStatusBar(nil);
             let status_item = status_bar.statusItemWithLength_(-1.0);
             let _: id = msg_send![status_item, retain];
+            // A stable autosave name lets AppKit persist this item's menu-bar
+            // slot across relaunches, keyed by the name in
+            // `com.apple.controlcenter`'s "NSStatusItem Preferred Position"
+            // defaults. AppKit only writes that key once the user drags the
+            // item to a slot; from then on the position sticks. Without an
+            // autosave name every launch is a brand-new item with nothing to
+            // restore, so a once-positioned icon drifts back off-screen after
+            // LaunchAgent restarts. Necessary for persistence, not sufficient
+            // on its own to place a never-positioned item on a crowded bar.
+            let autosave = NSString::alloc(nil).init_str("GhostLinkStatusItem");
+            let _: () = msg_send![status_item, setAutosaveName: autosave];
             let _: () = msg_send![status_item, setVisible: YES];
             let _: () = msg_send![status_item, setHighlightMode: YES];
 
