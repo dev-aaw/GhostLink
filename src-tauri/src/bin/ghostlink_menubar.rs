@@ -19,6 +19,22 @@ mod macos_app {
 
     static MENU_HANDLER_CLASS: &str = "GhostLinkMenuHandler";
 
+    /// The macOS DPI-bypass strategies, in menu order. Kept in sync by hand with
+    /// `get_macos_strategies()` in engine/strategies.rs: the engine id must match
+    /// exactly (the daemon rejects an unknown id, which is why the pre-Phase-B
+    /// `mac-split-*` ids here silently did nothing), and the display name is what
+    /// the daemon reports back as `active_strategy_name` — matched below to light
+    /// the radio checkmark.
+    /// (engine id, menu label, engine display name)
+    const MAC_STRATEGIES: [(&str, &str, &str); 6] = [
+        ("mac-alt9", "⚡ Mid-SLD Split + Disorder (Recommended)", "macOS ALT9 (Recommended)"),
+        ("mac-alt11", "⚡ Mid-SLD Split + OOB Byte", "macOS ALT11"),
+        ("mac-general", "⚡ Mid-SLD Split + TLS Record Split", "macOS General"),
+        ("mac-alt3", "⚡ SNI Boundary Split (lightweight)", "macOS ALT3 (SNI-Split)"),
+        ("mac-alt10", "⚡ SLD Boundary Split", "macOS ALT10 (SLD-Split)"),
+        ("mac-http-hostmangle", "⚡ HTTP Host Header Mangle (port 80)", "macOS HTTP Host Mangle"),
+    ];
+
     struct AppContext {
         client: DaemonClient,
         runtime: tokio::runtime::Runtime,
@@ -29,9 +45,7 @@ mod macos_app {
         item_wg_daily: id,
         item_wg_full: id,
         item_smart_desc: id,
-        item_midsld: id,
-        item_tls_sni: id,
-        item_pos1: id,
+        strategy_items: [id; MAC_STRATEGIES.len()],
         item_status_desc: id,
         item_autostart: id,
     }
@@ -169,14 +183,13 @@ mod macos_app {
                 let smart_str = NSString::alloc(nil).init_str(&smart_text);
                 let _: () = msg_send![ctx.item_smart_desc, setTitle: smart_str];
 
-                // Update Active Strategy Radio State
-                let is_midsld = current_strat.contains("midsld") || current_strat.contains("mac-split-midsld");
-                let is_sni = current_strat.contains("sni") || current_strat.contains("mac-split-tls-sni");
-                let is_pos1 = current_strat.contains("pos1") || current_strat.contains("mac-split-pos-1");
-
-                let _: () = msg_send![ctx.item_midsld, setState: if is_midsld { 1isize } else { 0isize }];
-                let _: () = msg_send![ctx.item_tls_sni, setState: if is_sni { 1isize } else { 0isize }];
-                let _: () = msg_send![ctx.item_pos1, setState: if is_pos1 { 1isize } else { 0isize }];
+                // Update Active Strategy Radio State. `current_strat` is the
+                // daemon's `active_strategy_name` when connected, else the local
+                // `ctx.active_strategy` id — match either shape.
+                for (i, (id_str, _label, name_str)) in MAC_STRATEGIES.iter().enumerate() {
+                    let selected = current_strat == *id_str || current_strat == *name_str;
+                    let _: () = msg_send![ctx.strategy_items[i], setState: if selected { 1isize } else { 0isize }];
+                }
 
                 // Update Status Line Text
                 let status_line = if is_gl_running {
@@ -258,21 +271,42 @@ mod macos_app {
         }));
     }
 
-    extern "C" fn select_strategy_midsld(_this: &Object, _cmd: Sel, _item: id) {
-        catch_handler_panic("select_strategy_midsld", std::panic::AssertUnwindSafe(|| {
-            switch_strategy("mac-split-midsld");
+    // One handler per strategy menu item. `MAC_STRATEGIES[N].0` is the engine id
+    // the daemon expects; keeping the index in the fn name lines each handler up
+    // with its selector registration and its slot in `strategy_items`.
+    extern "C" fn select_strategy_0(_this: &Object, _cmd: Sel, _item: id) {
+        catch_handler_panic("select_strategy_0", std::panic::AssertUnwindSafe(|| {
+            switch_strategy(MAC_STRATEGIES[0].0);
         }));
     }
 
-    extern "C" fn select_strategy_tls_sni(_this: &Object, _cmd: Sel, _item: id) {
-        catch_handler_panic("select_strategy_tls_sni", std::panic::AssertUnwindSafe(|| {
-            switch_strategy("mac-split-tls-sni");
+    extern "C" fn select_strategy_1(_this: &Object, _cmd: Sel, _item: id) {
+        catch_handler_panic("select_strategy_1", std::panic::AssertUnwindSafe(|| {
+            switch_strategy(MAC_STRATEGIES[1].0);
         }));
     }
 
-    extern "C" fn select_strategy_pos1(_this: &Object, _cmd: Sel, _item: id) {
-        catch_handler_panic("select_strategy_pos1", std::panic::AssertUnwindSafe(|| {
-            switch_strategy("mac-split-pos-1");
+    extern "C" fn select_strategy_2(_this: &Object, _cmd: Sel, _item: id) {
+        catch_handler_panic("select_strategy_2", std::panic::AssertUnwindSafe(|| {
+            switch_strategy(MAC_STRATEGIES[2].0);
+        }));
+    }
+
+    extern "C" fn select_strategy_3(_this: &Object, _cmd: Sel, _item: id) {
+        catch_handler_panic("select_strategy_3", std::panic::AssertUnwindSafe(|| {
+            switch_strategy(MAC_STRATEGIES[3].0);
+        }));
+    }
+
+    extern "C" fn select_strategy_4(_this: &Object, _cmd: Sel, _item: id) {
+        catch_handler_panic("select_strategy_4", std::panic::AssertUnwindSafe(|| {
+            switch_strategy(MAC_STRATEGIES[4].0);
+        }));
+    }
+
+    extern "C" fn select_strategy_5(_this: &Object, _cmd: Sel, _item: id) {
+        catch_handler_panic("select_strategy_5", std::panic::AssertUnwindSafe(|| {
+            switch_strategy(MAC_STRATEGIES[5].0);
         }));
     }
 
@@ -409,9 +443,12 @@ mod macos_app {
             decl.add_method(sel!(toggleGhostLink:), toggle_ghostlink as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(toggleWireGuardDaily:), toggle_wg_daily as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(toggleWireGuardMac:), toggle_wg_mac as extern "C" fn(&Object, Sel, id));
-            decl.add_method(sel!(setStrategyMidsld:), select_strategy_midsld as extern "C" fn(&Object, Sel, id));
-            decl.add_method(sel!(setStrategyTlsSni:), select_strategy_tls_sni as extern "C" fn(&Object, Sel, id));
-            decl.add_method(sel!(setStrategyPos1:), select_strategy_pos1 as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(setStrategy0:), select_strategy_0 as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(setStrategy1:), select_strategy_1 as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(setStrategy2:), select_strategy_2 as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(setStrategy3:), select_strategy_3 as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(setStrategy4:), select_strategy_4 as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(setStrategy5:), select_strategy_5 as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(runAutoTune:), run_autotune as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(runProbe:), run_probe as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(toggleAutoStart:), toggle_autostart as extern "C" fn(&Object, Sel, id));
@@ -529,32 +566,26 @@ mod macos_app {
             let _: () = msg_send![item_strat_header, setEnabled: NO];
             let _: () = msg_send![menu, addItem: item_strat_header];
 
-            let item_midsld = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
-                NSString::alloc(nil).init_str("⚡ Mid-SLD + Disorder (Recommended)"),
-                sel!(setStrategyMidsld:),
-                NSString::alloc(nil).init_str(""),
-            );
-            let _: () = msg_send![item_midsld, setTarget: handler];
-            let _: () = msg_send![item_midsld, retain];
-            let _: () = msg_send![menu, addItem: item_midsld];
-
-            let item_tls_sni = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
-                NSString::alloc(nil).init_str("⚡ TLS SNI Split"),
-                sel!(setStrategyTlsSni:),
-                NSString::alloc(nil).init_str(""),
-            );
-            let _: () = msg_send![item_tls_sni, setTarget: handler];
-            let _: () = msg_send![item_tls_sni, retain];
-            let _: () = msg_send![menu, addItem: item_tls_sni];
-
-            let item_pos1 = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
-                NSString::alloc(nil).init_str("⚡ macOS Split Pos 1"),
-                sel!(setStrategyPos1:),
-                NSString::alloc(nil).init_str(""),
-            );
-            let _: () = msg_send![item_pos1, setTarget: handler];
-            let _: () = msg_send![item_pos1, retain];
-            let _: () = msg_send![menu, addItem: item_pos1];
+            let strat_selectors = [
+                sel!(setStrategy0:),
+                sel!(setStrategy1:),
+                sel!(setStrategy2:),
+                sel!(setStrategy3:),
+                sel!(setStrategy4:),
+                sel!(setStrategy5:),
+            ];
+            let mut strategy_items: [id; MAC_STRATEGIES.len()] = [nil; MAC_STRATEGIES.len()];
+            for (i, (_id_str, label, _name_str)) in MAC_STRATEGIES.iter().enumerate() {
+                let it = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+                    NSString::alloc(nil).init_str(label),
+                    strat_selectors[i],
+                    NSString::alloc(nil).init_str(""),
+                );
+                let _: () = msg_send![it, setTarget: handler];
+                let _: () = msg_send![it, retain];
+                let _: () = msg_send![menu, addItem: it];
+                strategy_items[i] = it;
+            }
 
             let _: () = msg_send![menu, addItem: NSMenuItem::separatorItem(nil)];
 
@@ -601,14 +632,12 @@ mod macos_app {
                 client: DaemonClient::default(),
                 runtime: rt,
                 standalone_engine: None,
-                active_strategy: "mac-split-midsld".to_string(),
+                active_strategy: MAC_STRATEGIES[0].0.to_string(),
                 item_gl,
                 item_wg_daily,
                 item_wg_full,
                 item_smart_desc,
-                item_midsld,
-                item_tls_sni,
-                item_pos1,
+                strategy_items,
                 item_status_desc,
                 item_autostart,
             };

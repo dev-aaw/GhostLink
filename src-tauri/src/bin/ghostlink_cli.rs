@@ -29,7 +29,7 @@ enum Commands {
     ProbeDirect,
     /// Test a specific strategy against probe endpoints
     Test {
-        /// Strategy index (1-based) or Strategy ID (e.g. mac-split-midsld or 1)
+        /// Strategy index (1-based) or Strategy ID (e.g. mac-alt9 or 1)
         #[arg(short, long, default_value = "1")]
         strategy: String,
     },
