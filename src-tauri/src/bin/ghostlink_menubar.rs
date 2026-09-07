@@ -35,12 +35,29 @@ mod macos_app {
         ("mac-http-hostmangle", "⚡ HTTP Host Header Mangle (port 80)", "macOS HTTP Host Mangle"),
     ];
 
+    /// State that background work reads/writes. Everything here is plain Rust /
+    /// engine data — no Cocoa handles — so a worker thread can hold this lock
+    /// for the full duration of a ~10s engine start without ever making the
+    /// AppKit main thread wait on it.
     struct AppContext {
         client: DaemonClient,
         runtime: tokio::runtime::Runtime,
         standalone_engine: Option<UnblockEngine>,
         active_strategy: String,
-        // UI Item references
+    }
+
+    unsafe impl Send for AppContext {}
+    unsafe impl Sync for AppContext {}
+
+    static APP_CTX: std::sync::Mutex<Option<AppContext>> = std::sync::Mutex::new(None);
+
+    /// The Cocoa menu-item handles, populated once at startup and thereafter
+    /// only ever messaged from the AppKit main thread (via `apply_menu_snapshot`,
+    /// which runs only inside `main_thread::run`). Split out of `AppContext` on
+    /// purpose: painting the menu must never block behind a worker thread that
+    /// is mid-`client.start()` — that main-thread stall is exactly what made
+    /// macOS declare the app unresponsive and tear the status item down.
+    struct MenuItems {
         item_gl: id,
         item_wg_daily: id,
         item_wg_full: id,
@@ -50,10 +67,62 @@ mod macos_app {
         item_autostart: id,
     }
 
-    unsafe impl Send for AppContext {}
-    unsafe impl Sync for AppContext {}
+    unsafe impl Send for MenuItems {}
+    unsafe impl Sync for MenuItems {}
 
-    static APP_CTX: std::sync::Mutex<Option<AppContext>> = std::sync::Mutex::new(None);
+    static MENU_ITEMS: std::sync::OnceLock<MenuItems> = std::sync::OnceLock::new();
+
+    fn menu_items() -> &'static MenuItems {
+        MENU_ITEMS.get().expect("MENU_ITEMS not initialized")
+    }
+
+    /// Schedule a closure to run on the AppKit main thread via the main GCD
+    /// queue. Returns immediately; the closure runs when the main run loop next
+    /// services the queue (i.e. once any open menu-tracking loop has ended).
+    /// This is how worker threads hand their finished UI updates back — Cocoa
+    /// objects must only be messaged from the main thread.
+    mod main_thread {
+        use std::os::raw::c_void;
+
+        #[repr(C)]
+        pub struct DispatchQueueS {
+            _priv: [u8; 0],
+        }
+
+        extern "C" {
+            // The symbol behind C's `dispatch_get_main_queue()` macro. libdispatch
+            // is part of libSystem, always linked on macOS.
+            static _dispatch_main_q: DispatchQueueS;
+            fn dispatch_async_f(
+                queue: *const DispatchQueueS,
+                context: *mut c_void,
+                work: extern "C" fn(*mut c_void),
+            );
+        }
+
+        extern "C" fn trampoline(ctx: *mut c_void) {
+            // SAFETY: `ctx` is exactly the pointer produced by `Box::into_raw`
+            // in `run` below, delivered by libdispatch exactly once. Rebox it so
+            // it is dropped after use. Catch panics: this frame is entered from
+            // C (libdispatch), so an escaping unwind would abort the process
+            // (same FFI-boundary rule as the menu handlers).
+            let f: Box<Box<dyn FnOnce()>> =
+                unsafe { Box::from_raw(ctx as *mut Box<dyn FnOnce()>) };
+            let f: Box<dyn FnOnce()> = *f;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || f()));
+        }
+
+        pub fn run<F: FnOnce() + Send + 'static>(f: F) {
+            let boxed: Box<Box<dyn FnOnce()>> = Box::new(Box::new(f));
+            unsafe {
+                dispatch_async_f(
+                    &_dispatch_main_q,
+                    Box::into_raw(boxed) as *mut c_void,
+                    trampoline,
+                );
+            }
+        }
+    }
 
     fn with_app_ctx<R, F: FnOnce(&mut AppContext) -> R>(f: F) -> R {
         // Recover from a poisoned lock: a panic inside one menu handler must not
@@ -108,7 +177,7 @@ mod macos_app {
     /// release invariants are owned by the Objective-C runtime, not Rust's
     /// borrow checker — a panic between two `msg_send!` calls leaves at worst
     /// a stale/half-updated menu item, corrected by the next successful
-    /// `update_menu_ui()`, never a memory-safety issue.
+    /// `apply_menu_snapshot()`, never a memory-safety issue.
     fn catch_handler_panic(label: &str, f: impl FnOnce() + std::panic::UnwindSafe) {
         if let Err(payload) = std::panic::catch_unwind(f) {
             let msg = panic_message(payload.as_ref());
@@ -117,157 +186,224 @@ mod macos_app {
         }
     }
 
-    /// Query real-time status of GhostLink, WireGuard (daily & full), Smart Fallback, and AutoStart.
-    fn update_menu_ui() {
-        with_app_ctx(|ctx| {
-            // 1. Query GhostLink Engine Status
-            let (is_gl_running, current_strat) = ctx.runtime.block_on(async {
-                if ctx.client.is_daemon_alive().await {
-                    if let Ok(st) = ctx.client.get_status().await {
-                        return (st.is_running, st.active_strategy_name.unwrap_or_else(|| ctx.active_strategy.clone()));
-                    }
+    /// Plain-data view of everything the menu displays. Produced by
+    /// `build_snapshot` on a worker thread; consumed by `apply_menu_snapshot`
+    /// on the main thread. No Cocoa handles, so it is cheap to `Send`.
+    #[derive(Clone, Default)]
+    struct MenuSnapshot {
+        gl_running: bool,
+        /// Daemon's `active_strategy_name` when connected, else the local id.
+        strat_label: String,
+        daily_connected: bool,
+        full_connected: bool,
+        route_count: usize,
+        autostart_enabled: bool,
+    }
+
+    /// Gather current status. BLOCKING (daemon IPC + two `scutil` forks + file
+    /// reads) — must only be called from a worker thread. Caller holds the
+    /// `APP_CTX` lock.
+    fn build_snapshot(ctx: &mut AppContext) -> MenuSnapshot {
+        let (gl_running, strat_label) = ctx.runtime.block_on(async {
+            if ctx.client.is_daemon_alive().await {
+                if let Ok(st) = ctx.client.get_status().await {
+                    return (
+                        st.is_running,
+                        st.active_strategy_name
+                            .unwrap_or_else(|| ctx.active_strategy.clone()),
+                    );
                 }
-                if let Some(ref eng) = ctx.standalone_engine {
-                    if eng.is_running() {
-                        return (true, ctx.active_strategy.clone());
-                    }
-                }
-                (false, ctx.active_strategy.clone())
-            });
-
-            // 2. Query WireGuard Tunnels Status (Mutual Exclusion).
-            // `status(name)` asks scutil by name and is independent of how
-            // `scutil --nc list` labels the tunnel type; list-parsing (tried
-            // briefly in v2.1.17) silently dropped .mobileconfig-provisioned or
-            // "[VPN]"-typed tunnels and showed them as Disconnected while up.
-            // This runs only on menuWillOpen:, so two short forks are fine.
-            let is_daily_connected = WireGuardManager::status("wg0-daily") == WireGuardState::Connected;
-            let is_full_connected = WireGuardManager::status("wg0-mac") == WireGuardState::Connected;
-
-            // 3. Query Learned Fallback Routes
-            let route_count = SmartRouter::load_routes().len();
-
-            // 4. Query AutoStart Status
-            let is_autostart_enabled = AutoStartManager::is_enabled();
-
-            unsafe {
-                // Update GhostLink Item
-                let gl_title = if is_gl_running {
-                    NSString::alloc(nil).init_str("👻 GhostLink: Active (DPI Bypass ON)")
-                } else {
-                    NSString::alloc(nil).init_str("👻 GhostLink: Inactive (Click to Start)")
-                };
-                let _: () = msg_send![ctx.item_gl, setTitle: gl_title];
-                let _: () = msg_send![ctx.item_gl, setState: if is_gl_running { 1isize } else { 0isize }];
-
-                // Update Split VPN (wg0-daily) Item
-                let daily_title = if is_daily_connected {
-                    NSString::alloc(nil).init_str("🛡️ Split VPN (wg0-daily): Connected")
-                } else {
-                    NSString::alloc(nil).init_str("🛡️ Split VPN (wg0-daily): Disconnected")
-                };
-                let _: () = msg_send![ctx.item_wg_daily, setTitle: daily_title];
-                let _: () = msg_send![ctx.item_wg_daily, setState: if is_daily_connected { 1isize } else { 0isize }];
-
-                // Update Full VPN (wg0-mac) Item
-                let full_title = if is_full_connected {
-                    NSString::alloc(nil).init_str("🌍 Full VPN (wg0-mac): Connected")
-                } else {
-                    NSString::alloc(nil).init_str("🌍 Full VPN (wg0-mac): Disconnected")
-                };
-                let _: () = msg_send![ctx.item_wg_full, setTitle: full_title];
-                let _: () = msg_send![ctx.item_wg_full, setState: if is_full_connected { 1isize } else { 0isize }];
-
-                // Update Smart Fallback Description
-                let smart_text = format!("🧠 Smart Fallback: {} domain(s) on WireGuard", route_count);
-                let smart_str = NSString::alloc(nil).init_str(&smart_text);
-                let _: () = msg_send![ctx.item_smart_desc, setTitle: smart_str];
-
-                // Update Active Strategy Radio State. `current_strat` is the
-                // daemon's `active_strategy_name` when connected, else the local
-                // `ctx.active_strategy` id — match either shape.
-                for (i, (id_str, _label, name_str)) in MAC_STRATEGIES.iter().enumerate() {
-                    let selected = current_strat == *id_str || current_strat == *name_str;
-                    let _: () = msg_send![ctx.strategy_items[i], setState: if selected { 1isize } else { 0isize }];
-                }
-
-                // Update Status Line Text
-                let status_line = if is_gl_running {
-                    format!("Status: Active (Strategy: {})", current_strat)
-                } else {
-                    "Status: Inactive".to_string()
-                };
-                let status_str = NSString::alloc(nil).init_str(&status_line);
-                let _: () = msg_send![ctx.item_status_desc, setTitle: status_str];
-
-                // Update AutoStart State
-                let _: () = msg_send![ctx.item_autostart, setState: if is_autostart_enabled { 1isize } else { 0isize }];
             }
+            if let Some(ref eng) = ctx.standalone_engine {
+                if eng.is_running() {
+                    return (true, ctx.active_strategy.clone());
+                }
+            }
+            (false, ctx.active_strategy.clone())
         });
+
+        // `status(name)` asks scutil by name and is independent of how
+        // `scutil --nc list` labels the tunnel type; list-parsing (tried
+        // briefly in v2.1.17) silently dropped .mobileconfig-provisioned or
+        // "[VPN]"-typed tunnels and showed them as Disconnected while up.
+        MenuSnapshot {
+            gl_running,
+            strat_label,
+            daily_connected: WireGuardManager::status("wg0-daily") == WireGuardState::Connected,
+            full_connected: WireGuardManager::status("wg0-mac") == WireGuardState::Connected,
+            route_count: SmartRouter::load_routes().len(),
+            autostart_enabled: AutoStartManager::is_enabled(),
+        }
+    }
+
+    fn gather_snapshot() -> MenuSnapshot {
+        with_app_ctx(build_snapshot)
+    }
+
+    /// Cache a fresh snapshot and paint it on the main thread. Call from a
+    /// worker thread.
+    fn publish(snap: MenuSnapshot) {
+        *LAST_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = snap.clone();
+        main_thread::run(move || apply_menu_snapshot(&snap));
+    }
+
+    /// Last snapshot painted, so `menuWillOpen:` can repaint instantly from
+    /// cache on the main thread (no IPC) while a fresh gather runs behind it.
+    /// A GCD main-queue block does not run during menu tracking, so without
+    /// this the menu would always show the previous open's data.
+    static LAST_SNAPSHOT: std::sync::Mutex<MenuSnapshot> =
+        std::sync::Mutex::new(MenuSnapshot {
+            gl_running: false,
+            strat_label: String::new(),
+            daily_connected: false,
+            full_connected: false,
+            route_count: 0,
+            autostart_enabled: false,
+        });
+
+    /// Push a snapshot into the Cocoa menu items. MAIN THREAD ONLY (only ever
+    /// invoked from a `main_thread::run` closure). Pure `msg_send!` — no IPC,
+    /// no subprocess, no lock on `APP_CTX`.
+    fn apply_menu_snapshot(snap: &MenuSnapshot) {
+        let items = menu_items();
+        unsafe {
+            let gl_title = if snap.gl_running {
+                NSString::alloc(nil).init_str("👻 GhostLink: Active (DPI Bypass ON)")
+            } else {
+                NSString::alloc(nil).init_str("👻 GhostLink: Inactive (Click to Start)")
+            };
+            let _: () = msg_send![items.item_gl, setTitle: gl_title];
+            let _: () = msg_send![items.item_gl, setState: if snap.gl_running { 1isize } else { 0isize }];
+
+            let daily_title = if snap.daily_connected {
+                NSString::alloc(nil).init_str("🛡️ Split VPN (wg0-daily): Connected")
+            } else {
+                NSString::alloc(nil).init_str("🛡️ Split VPN (wg0-daily): Disconnected")
+            };
+            let _: () = msg_send![items.item_wg_daily, setTitle: daily_title];
+            let _: () = msg_send![items.item_wg_daily, setState: if snap.daily_connected { 1isize } else { 0isize }];
+
+            let full_title = if snap.full_connected {
+                NSString::alloc(nil).init_str("🌍 Full VPN (wg0-mac): Connected")
+            } else {
+                NSString::alloc(nil).init_str("🌍 Full VPN (wg0-mac): Disconnected")
+            };
+            let _: () = msg_send![items.item_wg_full, setTitle: full_title];
+            let _: () = msg_send![items.item_wg_full, setState: if snap.full_connected { 1isize } else { 0isize }];
+
+            let smart_text = format!("🧠 Smart Fallback: {} domain(s) on WireGuard", snap.route_count);
+            let smart_str = NSString::alloc(nil).init_str(&smart_text);
+            let _: () = msg_send![items.item_smart_desc, setTitle: smart_str];
+
+            // Radio state: match either the daemon's display name or the id.
+            for (i, (id_str, _label, name_str)) in MAC_STRATEGIES.iter().enumerate() {
+                let selected = snap.strat_label == *id_str || snap.strat_label == *name_str;
+                let _: () = msg_send![items.strategy_items[i], setState: if selected { 1isize } else { 0isize }];
+            }
+
+            let status_line = if snap.gl_running {
+                format!("Status: Active (Strategy: {})", snap.strat_label)
+            } else {
+                "Status: Inactive".to_string()
+            };
+            let status_str = NSString::alloc(nil).init_str(&status_line);
+            let _: () = msg_send![items.item_status_desc, setTitle: status_str];
+
+            let _: () = msg_send![items.item_autostart, setState: if snap.autostart_enabled { 1isize } else { 0isize }];
+        }
+    }
+
+    /// Refresh the menu without blocking the caller: gather status on a worker
+    /// thread, then hand the finished snapshot to the main thread to paint.
+    fn refresh_menu() {
+        std::thread::spawn(|| publish(gather_snapshot()));
     }
 
     // Objective-C Callback Implementations
+    //
+    // Every handler that does IPC / subprocess / engine work now returns to the
+    // Objective-C runtime immediately, doing that work on a `std::thread` and
+    // handing the resulting `MenuSnapshot` back to the main thread via
+    // `main_thread::run`. Blocking the AppKit main thread here (as this file
+    // used to, for the full ~10s of an engine start) makes macOS declare the
+    // process unresponsive and tear down its status item / AX tree — after
+    // which every further click is a silent no-op until the agent is respawned.
+
     extern "C" fn menu_will_open(_this: &Object, _cmd: Sel, _menu: id) {
         catch_handler_panic("menu_will_open", std::panic::AssertUnwindSafe(|| {
-            update_menu_ui();
+            // Repaint from cache synchronously (main thread, no IPC) so the menu
+            // that is opening shows last-known status immediately, then kick a
+            // non-blocking refresh for the next open.
+            {
+                let cached = LAST_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                apply_menu_snapshot(&cached);
+            }
+            refresh_menu();
         }));
     }
 
     extern "C" fn toggle_ghostlink(_this: &Object, _cmd: Sel, _item: id) {
         catch_handler_panic("toggle_ghostlink", std::panic::AssertUnwindSafe(|| {
-        with_app_ctx(|ctx| {
-            let (is_daemon, is_running) = ctx.runtime.block_on(async {
-                if ctx.client.is_daemon_alive().await {
-                    if let Ok(st) = ctx.client.get_status().await {
-                        return (true, st.is_running);
-                    }
-                }
-                (false, ctx.standalone_engine.as_ref().map(|e| e.is_running()).unwrap_or(false))
-            });
-
-            if is_running {
-                // STOP
-                if is_daemon {
-                    let _ = ctx.runtime.block_on(ctx.client.stop());
-                } else if let Some(ref mut eng) = ctx.standalone_engine {
-                    let _ = ctx.runtime.block_on(eng.stop());
-                }
-                notify("GhostLink DPI Bypass", "GhostLink disconnected (normal routing restored)");
-            } else {
-                // START
-                let strat_id = ctx.active_strategy.clone();
-                if is_daemon {
-                    let _ = ctx.runtime.block_on(ctx.client.start(&strat_id, Some(1080), true));
-                } else {
-                    if ctx.standalone_engine.is_none() {
-                        ctx.standalone_engine = Some(UnblockEngine::new(EngineConfig::default()));
-                    }
-                    if let Some(ref mut eng) = ctx.standalone_engine {
-                        let strat_opt = eng.list_strategies().into_iter().find(|s| s.id == strat_id);
-                        if let Some(s) = strat_opt {
-                            let _ = ctx.runtime.block_on(eng.start(&s));
+            std::thread::spawn(|| {
+                let snap = with_app_ctx(|ctx| {
+                    let (is_daemon, is_running) = ctx.runtime.block_on(async {
+                        if ctx.client.is_daemon_alive().await {
+                            if let Ok(st) = ctx.client.get_status().await {
+                                return (true, st.is_running);
+                            }
                         }
-                    }
-                }
-                notify("GhostLink DPI Bypass", "GhostLink connected (YouTube & Discord unblocked)");
-            }
+                        (false, ctx.standalone_engine.as_ref().map(|e| e.is_running()).unwrap_or(false))
+                    });
 
-            update_menu_ui();
-        });
+                    if is_running {
+                        // STOP
+                        if is_daemon {
+                            let _ = ctx.runtime.block_on(ctx.client.stop());
+                        } else if let Some(ref mut eng) = ctx.standalone_engine {
+                            let _ = ctx.runtime.block_on(eng.stop());
+                        }
+                        notify("GhostLink DPI Bypass", "GhostLink disconnected (normal routing restored)");
+                    } else {
+                        // START
+                        let strat_id = ctx.active_strategy.clone();
+                        if is_daemon {
+                            let _ = ctx.runtime.block_on(ctx.client.start(&strat_id, Some(1080), true));
+                        } else {
+                            if ctx.standalone_engine.is_none() {
+                                ctx.standalone_engine = Some(UnblockEngine::new(EngineConfig::default()));
+                            }
+                            if let Some(ref mut eng) = ctx.standalone_engine {
+                                let strat_opt = eng.list_strategies().into_iter().find(|s| s.id == strat_id);
+                                if let Some(s) = strat_opt {
+                                    let _ = ctx.runtime.block_on(eng.start(&s));
+                                }
+                            }
+                        }
+                        notify("GhostLink DPI Bypass", "GhostLink connected (YouTube & Discord unblocked)");
+                    }
+
+                    build_snapshot(ctx)
+                });
+                publish(snap);
+            });
         }));
     }
 
     extern "C" fn toggle_wg_daily(_this: &Object, _cmd: Sel, _item: id) {
         catch_handler_panic("toggle_wg_daily", std::panic::AssertUnwindSafe(|| {
-            let _ = WireGuardManager::toggle_exclusive("wg0-daily");
-            update_menu_ui();
+            std::thread::spawn(|| {
+                let _ = WireGuardManager::toggle_exclusive("wg0-daily");
+                publish(gather_snapshot());
+            });
         }));
     }
 
     extern "C" fn toggle_wg_mac(_this: &Object, _cmd: Sel, _item: id) {
         catch_handler_panic("toggle_wg_mac", std::panic::AssertUnwindSafe(|| {
-            let _ = WireGuardManager::toggle_exclusive("wg0-mac");
-            update_menu_ui();
+            std::thread::spawn(|| {
+                let _ = WireGuardManager::toggle_exclusive("wg0-mac");
+                publish(gather_snapshot());
+            });
         }));
     }
 
@@ -310,32 +446,40 @@ mod macos_app {
         }));
     }
 
+    /// Set the active strategy and, if the engine is up, restart it on the new
+    /// one. Non-blocking: the work runs on a worker thread (a daemon restart is
+    /// as slow as a cold start), then the snapshot is painted on the main
+    /// thread. Safe to call from another worker thread (e.g. auto-tune).
     fn switch_strategy(strategy_id: &str) {
-        with_app_ctx(|ctx| {
-            ctx.active_strategy = strategy_id.to_string();
+        let strategy_id = strategy_id.to_string();
+        std::thread::spawn(move || {
+            let snap = with_app_ctx(|ctx| {
+                ctx.active_strategy = strategy_id.clone();
 
-            let (is_daemon, is_running) = ctx.runtime.block_on(async {
-                if ctx.client.is_daemon_alive().await {
-                    if let Ok(st) = ctx.client.get_status().await {
-                        return (true, st.is_running);
+                let (is_daemon, is_running) = ctx.runtime.block_on(async {
+                    if ctx.client.is_daemon_alive().await {
+                        if let Ok(st) = ctx.client.get_status().await {
+                            return (true, st.is_running);
+                        }
                     }
+                    (false, ctx.standalone_engine.as_ref().map(|e| e.is_running()).unwrap_or(false))
+                });
+
+                if is_running {
+                    if is_daemon {
+                        let _ = ctx.runtime.block_on(ctx.client.start(&strategy_id, Some(1080), true));
+                    } else if let Some(ref mut eng) = ctx.standalone_engine {
+                        let strat_opt = eng.list_strategies().into_iter().find(|s| s.id == strategy_id);
+                        if let Some(s) = strat_opt {
+                            let _ = ctx.runtime.block_on(eng.start(&s));
+                        }
+                    }
+                    notify("GhostLink Strategy Switched", &format!("Active: {}", strategy_id));
                 }
-                (false, ctx.standalone_engine.as_ref().map(|e| e.is_running()).unwrap_or(false))
+
+                build_snapshot(ctx)
             });
-
-            if is_running {
-                if is_daemon {
-                    let _ = ctx.runtime.block_on(ctx.client.start(strategy_id, Some(1080), true));
-                } else if let Some(ref mut eng) = ctx.standalone_engine {
-                    let strat_opt = eng.list_strategies().into_iter().find(|s| s.id == strategy_id);
-                    if let Some(s) = strat_opt {
-                        let _ = ctx.runtime.block_on(eng.start(&s));
-                    }
-                }
-                notify("GhostLink Strategy Switched", &format!("Active: {}", strategy_id));
-            }
-
-            update_menu_ui();
+            publish(snap);
         });
     }
 
@@ -410,9 +554,11 @@ mod macos_app {
 
     extern "C" fn toggle_autostart(_this: &Object, _cmd: Sel, _item: id) {
         catch_handler_panic("toggle_autostart", std::panic::AssertUnwindSafe(|| {
-            let exe = std::env::current_exe().unwrap_or_default();
-            let _ = AutoStartManager::toggle(&exe);
-            update_menu_ui();
+            std::thread::spawn(|| {
+                let exe = std::env::current_exe().unwrap_or_default();
+                let _ = AutoStartManager::toggle(&exe); // shells out to launchctl
+                publish(gather_snapshot());
+            });
         }));
     }
 
@@ -628,11 +774,7 @@ mod macos_app {
 
             status_item.setMenu_(menu);
 
-            let ctx = AppContext {
-                client: DaemonClient::default(),
-                runtime: rt,
-                standalone_engine: None,
-                active_strategy: MAC_STRATEGIES[0].0.to_string(),
+            let _ = MENU_ITEMS.set(MenuItems {
                 item_gl,
                 item_wg_daily,
                 item_wg_full,
@@ -640,11 +782,20 @@ mod macos_app {
                 strategy_items,
                 item_status_desc,
                 item_autostart,
+            });
+
+            let ctx = AppContext {
+                client: DaemonClient::default(),
+                runtime: rt,
+                standalone_engine: None,
+                active_strategy: MAC_STRATEGIES[0].0.to_string(),
             };
 
             *APP_CTX.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx);
 
-            update_menu_ui();
+            // Items already carry sensible initial titles; this fills in live
+            // status a moment later without blocking startup.
+            refresh_menu();
 
             let _: () = msg_send![app, finishLaunching];
             println!("👻 GhostLink Native Menu Bar App running with Full VPN and Smart Router.");
