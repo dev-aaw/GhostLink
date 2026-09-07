@@ -7,7 +7,7 @@ mod macos_app {
         NSStatusBar, NSStatusItem,
     };
     use cocoa::base::{id, nil, NO, YES};
-    use cocoa::foundation::{NSAutoreleasePool, NSString};
+    use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
     use objc::declare::ClassDecl;
     use objc::runtime::{Class, Object, Sel};
     use objc::{class, msg_send, sel, sel_impl};
@@ -610,6 +610,53 @@ mod macos_app {
         }
     }
 
+    /// An 18×18 *template* image of a plain ghost: a rounded dome, a zig-zag
+    /// hem, and two eye holes. Drawn with NSBezierPath into an NSImage via
+    /// lockFocus — no asset catalog, no bundle, and (unlike the "👻" emoji) no
+    /// dependence on an emoji font that renders at its own size/colour. With
+    /// `isTemplate = true` AppKit tints it to match a light or dark menu bar
+    /// automatically.
+    unsafe fn ghost_template_image() -> id {
+        let image: id = msg_send![class!(NSImage), alloc];
+        let image: id = msg_send![image, initWithSize: NSSize::new(18.0, 18.0)];
+
+        let _: () = msg_send![image, lockFocus];
+
+        // y is up. The silhouette sits in roughly x∈[3,15], y∈[2,16].
+        let path: id = msg_send![class!(NSBezierPath), bezierPath];
+        // Right shoulder, then counter-clockwise over the dome to the left shoulder.
+        let _: () = msg_send![path, moveToPoint: NSPoint::new(15.0, 10.0)];
+        let _: () = msg_send![path,
+            appendBezierPathWithArcWithCenter: NSPoint::new(9.0, 10.0)
+            radius: 6.0_f64
+            startAngle: 0.0_f64
+            endAngle: 180.0_f64];
+        // Down the left side, then a zig-zag hem across to the right side.
+        let _: () = msg_send![path, lineToPoint: NSPoint::new(3.0, 4.0)];
+        let _: () = msg_send![path, lineToPoint: NSPoint::new(5.4, 2.2)];
+        let _: () = msg_send![path, lineToPoint: NSPoint::new(7.8, 4.0)];
+        let _: () = msg_send![path, lineToPoint: NSPoint::new(9.0, 2.6)];
+        let _: () = msg_send![path, lineToPoint: NSPoint::new(10.2, 4.0)];
+        let _: () = msg_send![path, lineToPoint: NSPoint::new(12.6, 2.2)];
+        let _: () = msg_send![path, lineToPoint: NSPoint::new(15.0, 4.0)];
+        let _: () = msg_send![path, closePath]; // up the right side, back to (15,10)
+
+        // Eye holes — even-odd winding subtracts them from the body.
+        let _: () = msg_send![path,
+            appendBezierPathWithOvalInRect: NSRect::new(NSPoint::new(6.2, 7.4), NSSize::new(2.2, 3.0))];
+        let _: () = msg_send![path,
+            appendBezierPathWithOvalInRect: NSRect::new(NSPoint::new(9.6, 7.4), NSSize::new(2.2, 3.0))];
+        let _: () = msg_send![path, setWindingRule: 1_u64]; // NSEvenOddWindingRule
+
+        let color: id = msg_send![class!(NSColor), blackColor];
+        let _: () = msg_send![color, set];
+        let _: () = msg_send![path, fill];
+
+        let _: () = msg_send![image, unlockFocus];
+        let _: () = msg_send![image, setTemplate: YES];
+        image
+    }
+
     pub fn run() -> anyhow::Result<()> {
         // So catch_handler_panic's log_msg() calls below actually persist
         // somewhere (~/.ghostlink/logs/menubar.log) instead of silently
@@ -647,10 +694,18 @@ mod macos_app {
             let _: () = msg_send![status_item, setVisible: YES];
             let _: () = msg_send![status_item, setHighlightMode: YES];
 
-            let title_str = NSString::alloc(nil).init_str("👻 GhostLink");
             let button: id = msg_send![status_item, button];
             if button != nil {
-                let _: () = msg_send![button, setTitle: title_str];
+                // Icon only — no "👻 GhostLink" text, no status text. The
+                // running state and active strategy still show in the dropdown
+                // (item_gl / item_status_desc), so nothing is lost from view.
+                let icon = ghost_template_image();
+                let _: () = msg_send![button, setImage: icon];
+                let _: () = msg_send![button, setImagePosition: 1_u64]; // NSImageOnly
+                let empty: id = NSString::alloc(nil).init_str("");
+                let _: () = msg_send![button, setTitle: empty];
+                let tip: id = NSString::alloc(nil).init_str("GhostLink");
+                let _: () = msg_send![button, setToolTip: tip];
                 let _: () = msg_send![button, setHidden: NO];
             }
 
